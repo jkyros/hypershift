@@ -71,7 +71,7 @@ func ReconcileKarpenterDeployment(deployment *appsv1.Deployment,
 	hcp *hyperv1.HostedControlPlane,
 	sa *corev1.ServiceAccount,
 	kubeConfigSecret *corev1.Secret,
-	availabilityProberImage, tokenMinterImage string,
+	availabilityProberImage, tokenMinterImage, karpenterProviderImage string,
 	setDefaultSecurityContext bool,
 	ownerRef config.OwnerRef) error {
 
@@ -139,10 +139,9 @@ func ReconcileKarpenterDeployment(deployment *appsv1.Deployment,
 				},
 				Containers: []corev1.Container{
 					{
-						Name:      karpenterName,
-						Resources: karpenterResources,
-						// TODO(alberto): lifecycle this image.
-						Image:           "public.ecr.aws/karpenter/controller:1.0.7",
+						Name:            karpenterName,
+						Resources:       karpenterResources,
+						Image:           karpenterProviderImage,
 						ImagePullPolicy: corev1.PullIfNotPresent,
 						VolumeMounts: []corev1.VolumeMount{
 							{
@@ -365,6 +364,7 @@ func (r *Reconciler) reconcileKarpenter(ctx context.Context, hcp *hyperv1.Hosted
 	setDefaultSecurityContext := false
 	availabilityProberImage := r.ControlPlaneOperatorImage
 	tokenMinterImage := r.ControlPlaneOperatorImage
+	karpenterProviderImage := r.KarpenterProviderImage
 
 	role := KarpenterRole(hcp.Namespace)
 	_, err := createOrUpdate(ctx, c, role, func() error {
@@ -408,7 +408,7 @@ func (r *Reconciler) reconcileKarpenter(ctx context.Context, hcp *hyperv1.Hosted
 
 		deployment := KarpenterDeployment(hcp.Namespace)
 		_, err = createOrUpdate(ctx, c, deployment, func() error {
-			return ReconcileKarpenterDeployment(deployment, hcp, serviceAccount, capiKubeConfigSecret, availabilityProberImage, tokenMinterImage, setDefaultSecurityContext, ownerRef)
+			return ReconcileKarpenterDeployment(deployment, hcp, serviceAccount, capiKubeConfigSecret, availabilityProberImage, tokenMinterImage, karpenterProviderImage, setDefaultSecurityContext, ownerRef)
 		})
 		if err != nil {
 			return fmt.Errorf("failed to reconcile karpenter deployment: %w", err)

@@ -105,7 +105,15 @@ spec:
 	// TODO(alberto): Ensure deletion if autoNode is disabled.
 
 	// Run karpenter Operator to manage CRs management and guest side.
-	if err := karpenteroperatormanifest.ReconcileKarpenterOperator(ctx, createOrUpdate, r.Client, hypershiftOperatorImage, controlPlaneOperatorImage, hcp); err != nil {
+
+	// TODO(jkyros): Grab the karpenter image in the proper place at the beginning with args, not here?
+	karpenterProviderImage, hasImage := releaseImage.ComponentImages()["aws-karpenter-provider-aws"]
+	if !hasImage {
+		karpenterProviderImage = "public.ecr.aws/karpenter/controller:1.0.7"
+		return fmt.Errorf("karpenter provider image does not exist in release image %s, falling back to upstream image %s", releaseImage.Name, karpenterProviderImage)
+	}
+
+	if err := karpenteroperatormanifest.ReconcileKarpenterOperator(ctx, createOrUpdate, r.Client, hypershiftOperatorImage, controlPlaneOperatorImage, karpenterProviderImage, hcp); err != nil {
 		return err
 	}
 	return nil
