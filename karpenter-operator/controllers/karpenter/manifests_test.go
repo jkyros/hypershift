@@ -9,6 +9,7 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
+	"github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
 
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -74,7 +75,7 @@ func TestReconcileKarpenter(t *testing.T) {
 			},
 			objects:                   []client.Object{fakeCapiKubeConfigSecret},
 			expectReconcileDeployment: true,
-			expectedImage:             "public.ecr.aws/karpenter/controller:1.0.7", // TODO: lifecycle image
+			expectedImage:             assets.DefaultKarpenterProviderAWSImage,
 		},
 		{
 			name: "Karpenter uses override provider image",

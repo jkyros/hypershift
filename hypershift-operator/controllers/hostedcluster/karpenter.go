@@ -17,8 +17,10 @@ import (
 	"fmt"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool"
 	haproxy "github.com/openshift/hypershift/hypershift-operator/controllers/nodepool/apiserver-haproxy"
+	"github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
 	karpenteroperatormanifest "github.com/openshift/hypershift/karpenter-operator/manifests"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/upsert"
@@ -105,7 +107,21 @@ spec:
 	// TODO(alberto): Ensure deletion if autoNode is disabled.
 
 	// Run karpenter Operator to manage CRs management and guest side.
-	if err := karpenteroperatormanifest.ReconcileKarpenterOperator(ctx, createOrUpdate, r.Client, hypershiftOperatorImage, controlPlaneOperatorImage, hcp); err != nil {
+
+	// TODO(jkyros): Grab the karpenter image in the proper place at the beginning with args, not here?
+	var karpenterProviderAWSImage string
+	// the precedence here is hcp annoation > release image > default
+	karpenterProviderAWSReleaseImage, hasImage := releaseImage.ComponentImages()["aws-karpenter-provider-aws"]
+	karpenterProviderAWSImageFromAnnotation, annotationExists := hcp.Annotations[hyperkarpenterv1.KarpenterProviderAWSImage]
+	if annotationExists {
+		karpenterProviderAWSImage = karpenterProviderAWSImageFromAnnotation
+	} else if hasImage {
+		karpenterProviderAWSImage = karpenterProviderAWSReleaseImage
+	} else {
+		karpenterProviderAWSImage = assets.DefaultKarpenterProviderAWSImage
+	}
+
+	if err := karpenteroperatormanifest.ReconcileKarpenterOperator(ctx, createOrUpdate, r.Client, hypershiftOperatorImage, controlPlaneOperatorImage, karpenterProviderAWSImage, hcp); err != nil {
 		return err
 	}
 	return nil

@@ -5,7 +5,6 @@ import (
 	"fmt"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
-	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/kas"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests/controlplaneoperator"
 	"github.com/openshift/hypershift/support/config"
@@ -366,10 +365,7 @@ func (r *Reconciler) reconcileKarpenter(ctx context.Context, hcp *hyperv1.Hosted
 	setDefaultSecurityContext := false
 	availabilityProberImage := r.ControlPlaneOperatorImage
 	tokenMinterImage := r.ControlPlaneOperatorImage
-	karpenterProviderAWSImage, exists := hcp.Annotations[hyperkarpenterv1.KarpenterProviderAWSImage]
-	if !exists {
-		karpenterProviderAWSImage = "public.ecr.aws/karpenter/controller:1.0.7"
-	}
+	karpenterProviderAWSImage := r.KarpenterProviderAWSImage
 
 	role := KarpenterRole(hcp.Namespace)
 	_, err := createOrUpdate(ctx, c, role, func() error {
