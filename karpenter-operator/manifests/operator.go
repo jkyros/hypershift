@@ -334,6 +334,12 @@ func ReconcileKarpenterOperatorRole(role *rbacv1.Role, owner config.OwnerRef) er
 				"deletecollection",
 			},
 		},
+		{
+			// TODO(jkyros): Need to be able to create the CRDs for nodeclass in the management cluster
+			APIGroups: []string{"apiextensions.k8s.io"},
+			Resources: []string{"customresourcedefinitions"},
+			Verbs:     []string{rbacv1.VerbAll},
+		},
 	}
 	return nil
 }
