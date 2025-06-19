@@ -20,6 +20,7 @@ import (
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
 	"k8s.io/utils/ptr"
 
+	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/cluster"
@@ -65,8 +66,8 @@ func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, man
 		return fmt.Errorf("failed to construct controller: %w", err)
 	}
 
-	// Watch CRDs guest side.
-	if err := c.Watch(source.Kind[client.Object](mgr.GetCache(), &apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(
+	// Watch CRDs management side.
+	if err := c.Watch(source.Kind[client.Object](managementCluster.GetCache(), &apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(
 		func(ctx context.Context, o client.Object) []ctrl.Request {
 			// Only watch our Karpenter CRDs
 			switch o.GetName() {
@@ -81,8 +82,8 @@ func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, man
 		return fmt.Errorf("failed to watch CRDs: %w", err)
 	}
 
-	// Watch EC2NodeClass guest side.
-	if err := c.Watch(source.Kind(mgr.GetCache(), &awskarpenterv1.EC2NodeClass{},
+	// Watch EC2NodeClass management side.
+	if err := c.Watch(source.Kind(managementCluster.GetCache(), &awskarpenterv1.EC2NodeClass{},
 		&handler.TypedEnqueueRequestForObject[*awskarpenterv1.EC2NodeClass]{})); err != nil {
 		return fmt.Errorf("failed to watch EC2NodeClass: %w", err)
 	}
@@ -216,14 +217,18 @@ func (r *Reconciler) reconcileCRDs(ctx context.Context, onlyCreate bool) error {
 		crdNodePool,
 		crdNodeClaim,
 	} {
+		// TODO(jkyros): We're going to try and namespace these here lol
+		klog.Infof("jkyros is Namespacing karpenter's CRDs")
+		crd.Spec.Scope = apiextensionsv1.NamespaceScoped
 		if onlyCreate {
-			if err := r.GuestClient.Create(ctx, crd); err != nil {
+			if err := r.ManagementClient.Create(ctx, crd); err != nil {
 				if !apierrors.IsAlreadyExists(err) {
 					errs = append(errs, err)
 				}
 			}
 		} else {
-			op, err = r.CreateOrUpdate(ctx, r.GuestClient, crd, func() error {
+			// TODO(jkyros): I'm stuffing these in the management cluster now so it works
+			op, err = r.CreateOrUpdate(ctx, r.ManagementClient, crd, func() error {
 				return nil
 			})
 			if err != nil {
