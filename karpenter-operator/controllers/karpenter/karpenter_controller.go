@@ -250,8 +250,10 @@ func (r *Reconciler) reconcileOpenshiftEC2NodeClassDefault(ctx context.Context, 
 
 	ec2NodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
 	ec2NodeClass.SetName("default")
+	// TODO(jkyros): For now, stuff the real ec2 nodeclass in the control plane
+	ec2NodeClass.Namespace = r.Namespace
 
-	op, err := r.CreateOrUpdate(ctx, r.GuestClient, ec2NodeClass, func() error {
+	op, err := r.CreateOrUpdate(ctx, r.ManagementClient, ec2NodeClass, func() error {
 		ec2NodeClass.Spec = hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 			SubnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
 				{
