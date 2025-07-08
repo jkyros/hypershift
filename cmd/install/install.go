@@ -664,6 +664,10 @@ func setupCRDs(opts Options, operatorNamespace *corev1.Namespace, operatorServic
 				if strings.Contains(path, "cluster-api/") {
 					return true
 				}
+				if strings.Contains(path, "karpenter/") {
+					// TODO(jkyros): make this conditional
+					return true
+				}
 				if len(opts.PlatformsToInstall) > 0 {
 					for _, platform := range opts.PlatformsToInstall {
 						if strings.Contains(path, strings.ToLower(platform)) {

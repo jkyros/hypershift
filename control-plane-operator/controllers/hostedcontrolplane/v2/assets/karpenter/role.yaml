@@ -21,3 +21,16 @@ rules:
       - "update"
     resourceNames:
       - "karpenter-leader-election"
+  - apiGroups: 
+      - "karpenter.k8s.aws"
+    resources: 
+      - "ec2nodeclasses"
+    verbs: 
+      - "*"
+  - apiGroups: 
+      - "karpenter.sh"
+    resources:
+      - "nodeclaims"
+      - "nodepools"
+    verbs: 
+      - "*"

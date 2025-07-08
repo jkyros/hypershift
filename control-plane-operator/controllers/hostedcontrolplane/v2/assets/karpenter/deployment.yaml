@@ -22,9 +22,12 @@ spec:
           image: aws-karpenter-provider-aws # replaced by payload
           args:
             - "--log-level=debug"
+            - "--kubeconfig-for karpenter.k8s.aws:v1:EC2NodeClass:/mnt/kubeconfig/target-kubeconfig"
+            - "--kubeconfig-for karpenter.sh:v1:NodeClaim:/mnt/kubeconfig/target-kubeconfig"
+            - "--kubeconfig-for karpenter.sh:v1:NodePool:/mnt/kubeconfig/target-kubeconfig"
           env:
             - name: KUBECONFIG
-              value: "/mnt/kubeconfig/target-kubeconfig"
+              value: ""
             - name: SYSTEM_NAMESPACE
               valueFrom:
                 fieldRef:
