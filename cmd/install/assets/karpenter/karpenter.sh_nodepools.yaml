@@ -4,10 +4,6 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.2
-    api.openshift.io/merged-by-featuregates: "true"
-    include.release.openshift.io/ibm-cloud-managed: "true"
-    include.release.openshift.io/self-managed-high-availability: "true"
-    release.openshift.io/feature-set: TechPreviewNoUpgrade
   name: nodepools.karpenter.sh
 spec:
   group: karpenter.sh
@@ -18,7 +14,7 @@ spec:
     listKind: NodePoolList
     plural: nodepools
     singular: nodepool
-  scope: Namespaced
+  scope: Cluster
   versions:
     - additionalPrinterColumns:
         - jsonPath: .spec.template.spec.nodeClassRef.name

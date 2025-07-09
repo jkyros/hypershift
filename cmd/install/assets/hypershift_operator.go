@@ -1290,6 +1290,20 @@ func (o HyperShiftOperatorClusterRole) Build() *rbacv1.ClusterRole {
 				},
 			})
 	}
+	// TODO(jkyros): gate this on TechPreviewNoUpgrade once you figure out how to access that here
+	// we need this so we can delegate auth, hypershift-operator -> karpenter-operator -> karpenter
+	role.Rules = append(role.Rules,
+		rbacv1.PolicyRule{
+			APIGroups: []string{"karpenter.k8s.aws"},
+			Resources: []string{"ec2nodeclasses"},
+			Verbs:     []string{rbacv1.VerbAll},
+		},
+		rbacv1.PolicyRule{
+			APIGroups: []string{"karpenter.sh"},
+			Resources: []string{"nodeclaims", "nodepools"},
+			Verbs:     []string{rbacv1.VerbAll},
+		})
+
 	return role
 }
 

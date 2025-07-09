@@ -23,6 +23,7 @@ import (
 //go:embed cluster-api-provider-agent/*
 //go:embed cluster-api-provider-azure/*
 //go:embed cluster-api-provider-openstack/*
+//go:embed karpenter/*
 var CRDS embed.FS
 
 //go:embed recordingrules/*

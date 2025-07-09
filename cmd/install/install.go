@@ -630,6 +630,7 @@ func hyperShiftOperatorManifests(opts Options) ([]crclient.Object, []crclient.Ob
 // related to etcd are excluded from the list. If the option EnableConversionWebhook is set to true, the CRDs related
 // to hypershift.openshift.io group are annotated with the necessary annotations to enable the conversion webhook.
 func setupCRDs(opts Options, operatorNamespace *corev1.Namespace, operatorService *corev1.Service) []crclient.Object {
+	fmt.Printf("RUNNING JKYROS CODE v2!!\n")
 	var crds []crclient.Object
 	crds = append(
 		crds, assets.CustomResourceDefinitions(
@@ -666,6 +667,7 @@ func setupCRDs(opts Options, operatorNamespace *corev1.Namespace, operatorServic
 				}
 				if strings.Contains(path, "karpenter/") {
 					// TODO(jkyros): make this conditional
+					crd.Spec.Scope = apiextensionsv1.NamespaceScoped
 					return true
 				}
 				if len(opts.PlatformsToInstall) > 0 {

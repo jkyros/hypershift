@@ -4,10 +4,6 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.17.2
-    api.openshift.io/merged-by-featuregates: "true"
-    include.release.openshift.io/ibm-cloud-managed: "true"
-    include.release.openshift.io/self-managed-high-availability: "true"
-    release.openshift.io/feature-set: TechPreviewNoUpgrade
   name: ec2nodeclasses.karpenter.k8s.aws
 spec:
   group: karpenter.k8s.aws
@@ -21,7 +17,7 @@ spec:
       - ec2nc
       - ec2ncs
     singular: ec2nodeclass
-  scope: Namespaced
+  scope: Cluster
   versions:
     - additionalPrinterColumns:
         - jsonPath: .status.conditions[?(@.type=="Ready")].status
@@ -70,7 +66,12 @@ spec:
                     NOTE: We ignore the AMIFamily for hashing here because we hash the AMIFamily dynamically by using the alias using
                     the AMIFamily() helper function
                   enum:
+                    - AL2
+                    - AL2023
+                    - Bottlerocket
                     - Custom
+                    - Windows2019
+                    - Windows2022
                   type: string
                 amiSelectorTerms:
                   description: AMISelectorTerms is a list of or ami selector terms. The terms are ORed.
@@ -126,8 +127,14 @@ spec:
                   minItems: 1
                   type: array
                   x-kubernetes-validations:
-                    - message: expected only "id" to be set
-                      rule: '!self.exists(x, has(x.alias) || has(x.tags) || has(x.name) || has(x.owner))'
+                    - message: expected at least one, got none, ['tags', 'id', 'name', 'alias']
+                      rule: self.all(x, has(x.tags) || has(x.id) || has(x.name) || has(x.alias))
+                    - message: '''id'' is mutually exclusive, cannot be set with a combination of other fields in amiSelectorTerms'
+                      rule: '!self.exists(x, has(x.id) && (has(x.alias) || has(x.tags) || has(x.name) || has(x.owner)))'
+                    - message: '''alias'' is mutually exclusive, cannot be set with a combination of other fields in amiSelectorTerms'
+                      rule: '!self.exists(x, has(x.alias) && (has(x.id) || has(x.tags) || has(x.name) || has(x.owner)))'
+                    - message: '''alias'' is mutually exclusive, cannot be set with a combination of other amiSelectorTerms'
+                      rule: '!(self.exists(x, has(x.alias)) && self.size() != 1)'
                 associatePublicIPAddress:
                   description: AssociatePublicIPAddress controls if public IP addresses are assigned to instances that are launched with the nodeclass.
                   type: boolean
@@ -456,6 +463,8 @@ spec:
                   x-kubernetes-validations:
                     - message: role cannot be empty
                       rule: self != ''
+                    - message: immutable field changed
+                      rule: self == oldSelf
                 securityGroupSelectorTerms:
                   description: SecurityGroupSelectorTerms is a list of or security group selector terms. The terms are ORed.
                   items:
@@ -551,9 +560,28 @@ spec:
                     It must be in the appropriate format based on the AMIFamily in use. Karpenter will merge certain fields into
                     this UserData to ensure nodes are being provisioned with the correct configuration.
                   type: string
-              required: []
+              required:
+                - amiSelectorTerms
+                - securityGroupSelectorTerms
+                - subnetSelectorTerms
               type: object
-              x-kubernetes-validations: []
+              x-kubernetes-validations:
+                - message: must specify exactly one of ['role', 'instanceProfile']
+                  rule: (has(self.role) && !has(self.instanceProfile)) || (!has(self.role) && has(self.instanceProfile))
+                - message: changing from 'instanceProfile' to 'role' is not supported. You must delete and recreate this node class if you want to change this.
+                  rule: (has(oldSelf.role) && has(self.role)) || (has(oldSelf.instanceProfile) && has(self.instanceProfile))
+                - message: if set, amiFamily must be 'AL2' or 'Custom' when using an AL2 alias
+                  rule: '!has(self.amiFamily) || (self.amiSelectorTerms.exists(x, has(x.alias) && x.alias.find(''^[^@]+'') == ''al2'') ? (self.amiFamily == ''Custom'' || self.amiFamily == ''AL2'') : true)'
+                - message: if set, amiFamily must be 'AL2023' or 'Custom' when using an AL2023 alias
+                  rule: '!has(self.amiFamily) || (self.amiSelectorTerms.exists(x, has(x.alias) && x.alias.find(''^[^@]+'') == ''al2023'') ? (self.amiFamily == ''Custom'' || self.amiFamily == ''AL2023'') : true)'
+                - message: if set, amiFamily must be 'Bottlerocket' or 'Custom' when using a Bottlerocket alias
+                  rule: '!has(self.amiFamily) || (self.amiSelectorTerms.exists(x, has(x.alias) && x.alias.find(''^[^@]+'') == ''bottlerocket'') ? (self.amiFamily == ''Custom'' || self.amiFamily == ''Bottlerocket'') : true)'
+                - message: if set, amiFamily must be 'Windows2019' or 'Custom' when using a Windows2019 alias
+                  rule: '!has(self.amiFamily) || (self.amiSelectorTerms.exists(x, has(x.alias) && x.alias.find(''^[^@]+'') == ''windows2019'') ? (self.amiFamily == ''Custom'' || self.amiFamily == ''Windows2019'') : true)'
+                - message: if set, amiFamily must be 'Windows2022' or 'Custom' when using a Windows2022 alias
+                  rule: '!has(self.amiFamily) || (self.amiSelectorTerms.exists(x, has(x.alias) && x.alias.find(''^[^@]+'') == ''windows2022'') ? (self.amiFamily == ''Custom'' || self.amiFamily == ''Windows2022'') : true)'
+                - message: must specify amiFamily if amiSelectorTerms does not contain an alias
+                  rule: 'self.amiSelectorTerms.exists(x, has(x.alias)) ? true : has(self.amiFamily)'
             status:
               description: EC2NodeClassStatus contains the resolved state of the EC2NodeClass
               properties:
