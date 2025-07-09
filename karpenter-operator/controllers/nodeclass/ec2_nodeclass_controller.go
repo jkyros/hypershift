@@ -127,7 +127,8 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if !openshiftEC2NodeClass.DeletionTimestamp.IsZero() {
-		exists, err := util.DeleteIfNeeded(ctx, r.guestClient, ec2NodeClass)
+		// TODO(jkyros): not sure if we care about deletion yet but just in case
+		exists, err := util.DeleteIfNeeded(ctx, r.managementClient, ec2NodeClass)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -159,7 +160,8 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	if _, err := r.CreateOrUpdate(ctx, r.guestClient, ec2NodeClass, func() error {
+	// TODO(jkyros): I moved this to management client to hide it from the user
+	if _, err := r.CreateOrUpdate(ctx, r.managementClient, ec2NodeClass, func() error {
 		return reconcileEC2NodeClass(ec2NodeClass, openshiftEC2NodeClass, hcp, userDataSecret)
 	}); err != nil {
 		return ctrl.Result{}, err
@@ -184,7 +186,7 @@ func (r *EC2NodeClassReconciler) reconcileCRDs(ctx context.Context, onlyCreate b
 	var op controllerutil.OperationResult
 	var err error
 	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{
-		crdEC2NodeClass,
+		//crdEC2NodeClass,
 		crdOpenshiftEC2NodeClass,
 	} {
 		if onlyCreate {

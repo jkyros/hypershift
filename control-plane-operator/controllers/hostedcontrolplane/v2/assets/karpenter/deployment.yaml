@@ -22,12 +22,12 @@ spec:
           image: aws-karpenter-provider-aws # replaced by payload
           args:
             - "--log-level=debug"
-            - "--kubeconfig-for karpenter.k8s.aws:v1:EC2NodeClass:/mnt/kubeconfig/target-kubeconfig"
-            - "--kubeconfig-for karpenter.sh:v1:NodeClaim:/mnt/kubeconfig/target-kubeconfig"
-            - "--kubeconfig-for karpenter.sh:v1:NodePool:/mnt/kubeconfig/target-kubeconfig"
+            - "--kubeconfig-for=karpenter.k8s.aws:v1:EC2NodeClass:incluster"
+            - "--kubeconfig-for=karpenter.sh:v1:NodeClaim:incluster"
+            - "--kubeconfig-for=karpenter.sh:v1:NodePool:incluster"
           env:
             - name: KUBECONFIG
-              value: ""
+              value: "/mnt/kubeconfig/target-kubeconfig"
             - name: SYSTEM_NAMESPACE
               valueFrom:
                 fieldRef:
@@ -63,6 +63,8 @@ spec:
               mountPath: "/etc/provider"
             - name: serviceaccount-token
               mountPath: "/var/run/secrets/openshift/serviceaccount"
+            - name: management-kubeconfig
+              mountPath: "/mnt/managementkubeconfig"
           livenessProbe:
             httpGet:
               path: /healthz
@@ -90,6 +92,13 @@ spec:
             items:
               - key: value
                 path: target-kubeconfig
+        - name: management-kubeconfig
+          secret: 
+            defaultMode: 416
+            items: 
+             - key: kubeconfig
+               path: management-kubeconfig
+            secretName: hcco-kubeconfig
         - name: serviceaccount-token
           emptyDir: {}
         - name: provider-creds
