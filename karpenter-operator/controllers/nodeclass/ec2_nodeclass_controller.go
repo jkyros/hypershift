@@ -86,6 +86,7 @@ func (r *EC2NodeClassReconciler) SetupWithManager(ctx context.Context, mgr ctrl.
 			},
 		)).
 		Watches(&awskarpenterv1.EC2NodeClass{}, &handler.EnqueueRequestForObject{})
+		// TODO(jkyros): This watch either needs to get stuffed into a new controller or we need a split client
 
 	return bldr.Complete(r)
 }
@@ -127,7 +128,6 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if !openshiftEC2NodeClass.DeletionTimestamp.IsZero() {
-		// TODO(jkyros): not sure if we care about deletion yet but just in case
 		exists, err := util.DeleteIfNeeded(ctx, r.managementClient, ec2NodeClass)
 		if err != nil {
 			return ctrl.Result{}, err

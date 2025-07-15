@@ -20,11 +20,13 @@ spec:
       containers:
         - name: karpenter
           image: aws-karpenter-provider-aws # replaced by payload
+          imagePullPolicy: Always
           args:
             - "--log-level=debug"
-            - "--kubeconfig-for=karpenter.k8s.aws:v1:EC2NodeClass:incluster"
-            - "--kubeconfig-for=karpenter.sh:v1:NodeClaim:incluster"
-            - "--kubeconfig-for=karpenter.sh:v1:NodePool:incluster"
+            - "--kubeconfig-for=karpenter.k8s.aws:v1:EC2NodeClass:*:clusters-jkyyros-karp-1:incluster"
+            - "--kubeconfig-for=karpenter.sh:v1:NodeClaim:*:clusters-jkyyros-karp-1:incluster"
+            - "--kubeconfig-for=karpenter.sh:v1:NodePool:*:clusters-jkyyros-karp-1:incluster"
+            - "--kubeconfig-for=:v1:Node:*::/mnt/kubeconfig/target-kubeconfig"
           env:
             - name: KUBECONFIG
               value: "/mnt/kubeconfig/target-kubeconfig"

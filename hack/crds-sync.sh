@@ -4,3 +4,4 @@ set -euo pipefail
 
 
 cp vendor/github.com/aws/karpenter-provider-aws/pkg/apis/crds/* karpenter-operator/controllers/karpenter/assets/
+cp vendor/github.com/aws/karpenter-provider-aws/pkg/apis/crds/* cmd/install/assets/karpenter
