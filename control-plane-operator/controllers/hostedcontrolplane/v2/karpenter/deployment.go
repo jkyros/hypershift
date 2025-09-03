@@ -23,6 +23,18 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 		v.Secret.SecretName = manifests.KASServiceCAPIKubeconfigSecret(hcp.Namespace, hcp.Spec.InfraID).Name
 	})
 
+	sidecarContainer := corev1.Container{
+		Name:  "your-sidecar",
+		Image: "your-sidecar-image",
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "sidecar-config",
+				MountPath: "/etc/config",
+			},
+		},
+	}
+	deployment.Spec.Template.Spec.Containers = append(deployment.Spec.Template.Spec.Containers, sidecarContainer)
+
 	util.UpdateContainer(ComponentName, deployment.Spec.Template.Spec.Containers, func(c *corev1.Container) {
 		c.Env = append(c.Env,
 			corev1.EnvVar{

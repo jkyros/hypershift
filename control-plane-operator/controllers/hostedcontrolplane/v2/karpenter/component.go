@@ -42,6 +42,9 @@ func NewComponent() component.ControlPlaneComponent {
 		WithManifestAdapter("podmonitor.yaml",
 			component.WithAdaptFunction(adaptPodMonitor),
 		).
+		WithManifestAdapter("sidecar-config.yaml",
+			component.WithAdaptFunction(adaptSidecarConfig),
+		).
 		WithPredicate(predicate).
 		WithDependencies(karpenteroperatorv2.ComponentName).
 		InjectAvailabilityProberContainer(util.AvailabilityProberOpts{}).
