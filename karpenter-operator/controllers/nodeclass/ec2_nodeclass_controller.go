@@ -127,7 +127,7 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if !openshiftEC2NodeClass.DeletionTimestamp.IsZero() {
-		exists, err := util.DeleteIfNeeded(ctx, r.maangementClient, ec2NodeClass)
+		exists, err := util.DeleteIfNeeded(ctx, r.managementClient, ec2NodeClass)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -169,9 +169,10 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
+	/* TODO(jkyros): If we're going to split the client, we don't need the VAP
 	if err := r.reconcileVAP(ctx); err != nil {
 		return ctrl.Result{}, err
-	}
+	}*/
 
 	return ctrl.Result{}, nil
 }

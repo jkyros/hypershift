@@ -2,6 +2,7 @@ package karpenter
 
 import (
 	component "github.com/openshift/hypershift/support/controlplane-component"
+
 	corev1 "k8s.io/api/core/v1"
 )
 
