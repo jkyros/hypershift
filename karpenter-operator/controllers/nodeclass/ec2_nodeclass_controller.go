@@ -15,10 +15,8 @@ import (
 	"github.com/openshift/hypershift/support/upsert"
 	"github.com/openshift/hypershift/support/util"
 
-	awskarpenterapis "github.com/aws/karpenter-provider-aws/pkg/apis"
 	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
-	admissionv1 "k8s.io/api/admissionregistration/v1"
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -326,63 +324,6 @@ func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeCla
 
 	log.Info("Reconciled OpenshiftEC2NodeClass status")
 	return nil
-}
-
-func (r *EC2NodeClassReconciler) reconcileVAP(ctx context.Context) error {
-	vap := &admissionv1.ValidatingAdmissionPolicy{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "karpenter.ec2nodeclass.hypershift.io",
-		},
-	}
-
-	if _, err := r.CreateOrUpdate(ctx, r.guestClient, vap, func() error {
-		vap.Spec.MatchConstraints = &admissionv1.MatchResources{
-			ResourceRules: []admissionv1.NamedRuleWithOperations{
-				{
-					RuleWithOperations: admissionv1.RuleWithOperations{
-						Operations: []admissionv1.OperationType{
-							admissionv1.OperationAll,
-						},
-						Rule: admissionv1.Rule{
-							APIGroups:   []string{awskarpenterapis.Group},
-							APIVersions: []string{"v1"},
-							Resources:   []string{"ec2nodeclasses"},
-						},
-					},
-				},
-			},
-		}
-		vap.Spec.MatchConditions = []admissionv1.MatchCondition{
-			{
-				Name:       "exclude-hcco-user",
-				Expression: "'system:hosted-cluster-config' != request.userInfo.username",
-			},
-		}
-
-		vap.Spec.Validations = []admissionv1.Validation{
-			{
-				Expression: "has(oldObject.spec) && has(object.spec) && object.spec == oldObject.spec",
-				Message:    "EC2NodeClass resource can't be created/updated/deleted directly, please use OpenshiftEC2NodeClass resource instead",
-			},
-		}
-
-		return nil
-	}); err != nil {
-		return err
-	}
-
-	vapBinding := &admissionv1.ValidatingAdmissionPolicyBinding{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "karpenter-binding.ec2nodeclass.hypershift.io",
-		},
-	}
-	_, err := r.CreateOrUpdate(ctx, r.guestClient, vapBinding, func() error {
-		vapBinding.Spec.PolicyName = vap.Name
-		vapBinding.Spec.ValidationActions = []admissionv1.ValidationAction{admissionv1.Deny}
-		return nil
-	})
-
-	return err
 }
 
 func (r *EC2NodeClassReconciler) getUserDataSecret(ctx context.Context, hcp *hyperv1.HostedControlPlane) (*corev1.Secret, error) {

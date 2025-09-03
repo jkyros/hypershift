@@ -23,13 +23,45 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 		v.Secret.SecretName = manifests.KASServiceCAPIKubeconfigSecret(hcp.Namespace, hcp.Spec.InfraID).Name
 	})
 
+	// Adds an init container that generates our kubeconfig for our api split proxy
+	initContainer := corev1.Container{
+		Name:  "generate-proxy-kubeconfig",
+		Image: "quay.io/jkyros/skroobapi:latest",
+		Args: []string{
+			"skroobapi",
+			"--generate-kubeconfig=/mnt/shared-kubeconfig/skroobapi.kubeconfig",
+			"--kubeconfig-only",
+			"--kubeconfig-server=http://localhost:8082",
+		},
+		VolumeMounts: []corev1.VolumeMount{
+			{
+				Name:      "shared-kubeconfig",
+				MountPath: "/mnt/shared-kubeconfig",
+			},
+		},
+	}
+	deployment.Spec.Template.Spec.InitContainers = append(deployment.Spec.Template.Spec.InitContainers, initContainer)
+
+	// Adds our sidecar container that uses the kubeconfig from the init container
 	sidecarContainer := corev1.Container{
-		Name:  "your-sidecar",
-		Image: "your-sidecar-image",
+		Name:  "skroobapi",
+		Image: "quay.io/jkyros/skroobapi:latest",
+		// TODO(jkyros): unnecessary because I adjusted the defaults in the container
+		//Args: []string{
+		//	"--config=/etc/config/skroobapi.yaml",
+		//},
 		VolumeMounts: []corev1.VolumeMount{
 			{
 				Name:      "sidecar-config",
 				MountPath: "/etc/config",
+			},
+			{
+				Name:      "target-kubeconfig",
+				MountPath: "/mnt/kubeconfig",
+			},
+			{
+				Name:      "shared-kubeconfig",
+				MountPath: "/mnt/shared-kubeconfig",
 			},
 		},
 	}
@@ -46,6 +78,21 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 				Value: hcp.Spec.InfraID,
 			},
 		)
+
+		// Update KUBECONFIG to use the sidecar-generated kubeconfig
+		for i, env := range c.Env {
+			if env.Name == "KUBECONFIG" {
+				c.Env[i].Value = "/mnt/shared-kubeconfig/skroobapi.kubeconfig"
+				break
+			}
+		}
+
+		// Add shared volume mount for the sidecar-generated kubeconfig
+		c.VolumeMounts = append(c.VolumeMounts, corev1.VolumeMount{
+			Name:      "shared-kubeconfig",
+			MountPath: "/mnt/shared-kubeconfig",
+		})
+
 		// Override the image if specified in the HCP annotations.
 		karpenterProviderAWSOverride, exists := hcp.Annotations[hyperkarpenterv1.KarpenterProviderAWSImage]
 		if exists {
@@ -91,6 +138,28 @@ func adaptDeployment(cpContext component.WorkloadContext, deployment *appsv1.Dep
 			},
 		},
 	)
+
+	// Add ConfigMap volume for sidecar configuration
+	configVolume := corev1.Volume{
+		Name: "sidecar-config",
+		VolumeSource: corev1.VolumeSource{
+			ConfigMap: &corev1.ConfigMapVolumeSource{
+				LocalObjectReference: corev1.LocalObjectReference{
+					Name: "karpenter-skroobapi-config",
+				},
+			},
+		},
+	}
+	deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, configVolume)
+
+	// Add shared volume for the sidecar-generated kubeconfig
+	sharedVolume := corev1.Volume{
+		Name: "shared-kubeconfig",
+		VolumeSource: corev1.VolumeSource{
+			EmptyDir: &corev1.EmptyDirVolumeSource{},
+		},
+	}
+	deployment.Spec.Template.Spec.Volumes = append(deployment.Spec.Template.Spec.Volumes, sharedVolume)
 
 	return nil
 }
