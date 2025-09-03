@@ -1,0 +1,58 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: karpenter-operator-HCP_NAMESPACE
+rules:
+  # CRD management permissions
+  - apiGroups:
+      - "apiextensions.k8s.io"
+    resources:
+      - "customresourcedefinitions"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
+      - "create"
+      - "update"
+      - "patch"
+      - "delete"
+  # Karpenter CRD permissions in management cluster
+  - apiGroups:
+      - "karpenter.k8s.aws"
+    resources:
+      - "ec2nodeclasses"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
+      - "create"
+      - "update"
+      - "patch"
+      - "delete"
+  - apiGroups:
+      - "karpenter.sh"
+    resources:
+      - "nodepools"
+      - "nodeclaims"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
+      - "create"
+      - "update"
+      - "patch"
+      - "delete"
+  # ValidatingAdmissionPolicy permissions (if needed)
+  - apiGroups:
+      - "admissionregistration.k8s.io"
+    resources:
+      - "validatingadmissionpolicies"
+      - "validatingadmissionpolicybindings"
+    verbs:
+      - "get"
+      - "list"
+      - "watch"
+      - "create"
+      - "update"
+      - "patch"
+      - "delete"

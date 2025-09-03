@@ -46,6 +46,12 @@ func NewComponent(options *KarpenterOperatorOptions) component.ControlPlaneCompo
 		WithManifestAdapter("podmonitor.yaml",
 			component.WithAdaptFunction(adaptPodMonitor),
 		).
+		WithManifestAdapter("clusterrole.yaml",
+			component.WithAdaptFunction(adaptClusterRole),
+		).
+		WithManifestAdapter("clusterrolebinding.yaml",
+			component.WithAdaptFunction(adaptClusterRoleBinding),
+		).
 		WithPredicate(predicate).
 		InjectTokenMinterContainer(component.TokenMinterContainerOptions{
 			TokenType:               component.CloudToken,
