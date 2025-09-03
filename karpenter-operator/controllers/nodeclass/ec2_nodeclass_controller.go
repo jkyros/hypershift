@@ -127,7 +127,7 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 	}
 
 	if !openshiftEC2NodeClass.DeletionTimestamp.IsZero() {
-		exists, err := util.DeleteIfNeeded(ctx, r.guestClient, ec2NodeClass)
+		exists, err := util.DeleteIfNeeded(ctx, r.maangementClient, ec2NodeClass)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -184,7 +184,6 @@ func (r *EC2NodeClassReconciler) reconcileCRDs(ctx context.Context, onlyCreate b
 	var op controllerutil.OperationResult
 	var err error
 	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{
-		crdEC2NodeClass,
 		crdOpenshiftEC2NodeClass,
 	} {
 		if onlyCreate {
@@ -203,6 +202,29 @@ func (r *EC2NodeClassReconciler) reconcileCRDs(ctx context.Context, onlyCreate b
 
 		}
 	}
+
+	// Mangle ec2nodeclasses to be namespace scoped, put in management cluster :)
+	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{
+		crdEC2NodeClass,
+	} {
+		crdEC2NodeClass.Spec.Scope = apiextensionsv1.NamespaceScoped
+		if onlyCreate {
+			if err := r.managementClient.Create(ctx, crd); err != nil {
+				if !apierrors.IsAlreadyExists(err) {
+					errs = append(errs, err)
+				}
+			}
+		} else {
+			op, err = r.CreateOrUpdate(ctx, r.managementClient, crd, func() error {
+				return nil
+			})
+			if err != nil {
+				errs = append(errs, err)
+			}
+
+		}
+	}
+
 	if err := utilerrors.NewAggregate(errs); err != nil {
 		return fmt.Errorf("failed to reconcile CRDs: %w", err)
 	}
