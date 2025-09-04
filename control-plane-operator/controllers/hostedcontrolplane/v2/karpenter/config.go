@@ -30,7 +30,7 @@ mappings:
   - group: "karpenter.k8s.aws"
     version: "v1"
     kind: "EC2NodeClass"
-    kubeconfig: "/mnt/kubeconfig/target-kubeconfig"
+    kubeconfig: "incluster"
     forceClusterScopedToNamespace: "%s"
     priority: 200
   # Route Nodes to guest cluster
@@ -66,9 +66,9 @@ mappings:
     priority: 150
   - group: "policy"
     version: "v1"
-	kind: 		"PodDisruptionBudget"
-	kubeconfig: "/mnt/kubeconfig/target-kubeconfig"
-	priority: 150
+    kind: "PodDisruptionBudget"
+    kubeconfig: "/mnt/kubeconfig/target-kubeconfig"
+    priority: 150
 `, namespace)
 
 	if cm.Data == nil {

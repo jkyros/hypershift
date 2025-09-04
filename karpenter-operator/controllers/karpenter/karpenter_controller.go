@@ -279,6 +279,8 @@ func (r *Reconciler) reconcileCRDs(ctx context.Context, onlyCreate bool) error {
 	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{
 		crdEC2NodeClass,
 	} {
+		crdEC2NodeClass.Spec.Scope = apiextensionsv1.NamespaceScoped
+
 		if onlyCreate {
 			if err := r.ManagementClient.Create(ctx, crd); err != nil {
 				if !apierrors.IsAlreadyExists(err) {

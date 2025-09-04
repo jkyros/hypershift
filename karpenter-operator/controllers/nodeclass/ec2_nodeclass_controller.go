@@ -11,7 +11,6 @@ import (
 	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
 	"github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
 	supportassets "github.com/openshift/hypershift/support/assets"
-	"github.com/openshift/hypershift/support/config"
 	"github.com/openshift/hypershift/support/upsert"
 	"github.com/openshift/hypershift/support/util"
 
@@ -75,8 +74,11 @@ func (r *EC2NodeClassReconciler) SetupWithManager(ctx context.Context, mgr ctrl.
 		}).
 		Watches(&apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, o client.Object) []ctrl.Request {
-				// Watch OpenshiftEC2NodeClass CRD from guest cluster
-				if o.GetName() == "openshiftec2nodeclasses.karpenter.hypershift.openshift.io" {
+				// Only watch our Karpenter CRDs
+				switch o.GetName() {
+
+				// TODO(jkyros): we need to watch the ec2nodeclass CRD also, but in the management cluster
+				case "openshiftec2nodeclasses.karpenter.hypershift.openshift.io":
 					return []ctrl.Request{{NamespacedName: client.ObjectKey{Namespace: r.Namespace}}}
 				}
 				return nil
@@ -84,17 +86,21 @@ func (r *EC2NodeClassReconciler) SetupWithManager(ctx context.Context, mgr ctrl.
 		)).
 		WatchesRawSource(
 			source.Kind(managementCluster.GetCache(), &apiextensionsv1.CustomResourceDefinition{}, handler.TypedEnqueueRequestsFromMapFunc[*apiextensionsv1.CustomResourceDefinition](
-				func(ctx context.Context, o *apiextensionsv1.CustomResourceDefinition) []ctrl.Request {
-					// Watch EC2NodeClass CRD from management cluster
-					if o.GetName() == "ec2nodeclasses.karpenter.k8s.aws" {
-						return []ctrl.Request{{NamespacedName: client.ObjectKey{Namespace: r.Namespace}}}
-					}
-					return nil
+				func(ctx context.Context, crd *apiextensionsv1.CustomResourceDefinition) []ctrl.Request {
+					// When EC2NodeClass changes in management cluster, find the corresponding OpenshiftEC2NodeClass
+					// The EC2NodeClass name should match the OpenshiftEC2NodeClass name
+					return []ctrl.Request{{NamespacedName: client.ObjectKey{Namespace: r.Namespace}}}
 				},
 			)),
 		).
 		WatchesRawSource(
-			source.Kind(managementCluster.GetCache(), &awskarpenterv1.EC2NodeClass{}, &handler.TypedEnqueueRequestForObject[*awskarpenterv1.EC2NodeClass]{}),
+			source.Kind(managementCluster.GetCache(), &awskarpenterv1.EC2NodeClass{}, handler.TypedEnqueueRequestsFromMapFunc[*awskarpenterv1.EC2NodeClass](
+				func(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2NodeClass) []ctrl.Request {
+					// When EC2NodeClass changes in management cluster, find the corresponding OpenshiftEC2NodeClass
+					// The EC2NodeClass name should match the OpenshiftEC2NodeClass name
+					return []ctrl.Request{{NamespacedName: client.ObjectKey{Name: ec2NodeClass.Name}}}
+				},
+			)),
 		)
 
 	return bldr.Complete(r)
@@ -131,8 +137,10 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	ec2NodeClass := &awskarpenterv1.EC2NodeClass{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:      openshiftEC2NodeClass.Name,
-			Namespace: openshiftEC2NodeClass.Namespace,
+			Name: openshiftEC2NodeClass.Name,
+			// TODO(jkyros): we're syncing from a cluster-scoped resource to a namespaced resource,
+			// so we are injecting the namespace here.
+			Namespace: r.Namespace,
 		},
 	}
 
@@ -245,8 +253,10 @@ func (r *EC2NodeClassReconciler) reconcileCRDs(ctx context.Context, onlyCreate b
 }
 
 func reconcileEC2NodeClass(ec2NodeClass *awskarpenterv1.EC2NodeClass, openshiftEC2NodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass, hcp *hyperv1.HostedControlPlane, userDataSecret *corev1.Secret) error {
-	ownerRef := config.OwnerRefFrom(openshiftEC2NodeClass)
-	ownerRef.ApplyTo(ec2NodeClass)
+	// TODO(jkyros): these are in separate clusters now, so they can't have an ownership relationship, we
+	// will potentially need to reconcile this ourselves
+	//ownerRef := config.OwnerRefFrom(openshiftEC2NodeClass)
+	//ownerRef.ApplyTo(ec2NodeClass)
 
 	ec2NodeClass.Spec = awskarpenterv1.EC2NodeClassSpec{
 		UserData:  ptr.To(string(userDataSecret.Data["value"])),
