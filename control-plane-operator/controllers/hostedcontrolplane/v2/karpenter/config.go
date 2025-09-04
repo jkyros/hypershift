@@ -64,6 +64,11 @@ mappings:
     kind: "DaemonSet"
     kubeconfig: "/mnt/kubeconfig/target-kubeconfig"
     priority: 150
+  - group: "policy"
+    version: "v1"
+	kind: 		"PodDisruptionBudget"
+	kubeconfig: "/mnt/kubeconfig/target-kubeconfig"
+	priority: 150
 `, namespace)
 
 	if cm.Data == nil {

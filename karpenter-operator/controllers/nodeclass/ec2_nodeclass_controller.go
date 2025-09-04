@@ -33,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 const (
@@ -74,16 +75,27 @@ func (r *EC2NodeClassReconciler) SetupWithManager(ctx context.Context, mgr ctrl.
 		}).
 		Watches(&apiextensionsv1.CustomResourceDefinition{}, handler.EnqueueRequestsFromMapFunc(
 			func(ctx context.Context, o client.Object) []ctrl.Request {
-				// Only watch our Karpenter CRDs
-				switch o.GetName() {
-				case "ec2nodeclasses.karpenter.k8s.aws",
-					"openshiftec2nodeclasses.karpenter.hypershift.openshift.io":
+				// Watch OpenshiftEC2NodeClass CRD from guest cluster
+				if o.GetName() == "openshiftec2nodeclasses.karpenter.hypershift.openshift.io" {
 					return []ctrl.Request{{NamespacedName: client.ObjectKey{Namespace: r.Namespace}}}
 				}
 				return nil
 			},
 		)).
-		Watches(&awskarpenterv1.EC2NodeClass{}, &handler.EnqueueRequestForObject{})
+		WatchesRawSource(
+			source.Kind(managementCluster.GetCache(), &apiextensionsv1.CustomResourceDefinition{}, handler.TypedEnqueueRequestsFromMapFunc[*apiextensionsv1.CustomResourceDefinition](
+				func(ctx context.Context, o *apiextensionsv1.CustomResourceDefinition) []ctrl.Request {
+					// Watch EC2NodeClass CRD from management cluster
+					if o.GetName() == "ec2nodeclasses.karpenter.k8s.aws" {
+						return []ctrl.Request{{NamespacedName: client.ObjectKey{Namespace: r.Namespace}}}
+					}
+					return nil
+				},
+			)),
+		).
+		WatchesRawSource(
+			source.Kind(managementCluster.GetCache(), &awskarpenterv1.EC2NodeClass{}, &handler.TypedEnqueueRequestForObject[*awskarpenterv1.EC2NodeClass]{}),
+		)
 
 	return bldr.Complete(r)
 }
