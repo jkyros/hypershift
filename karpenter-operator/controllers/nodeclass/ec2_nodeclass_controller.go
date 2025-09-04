@@ -157,7 +157,7 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, err
 	}
 
-	if _, err := r.CreateOrUpdate(ctx, r.guestClient, ec2NodeClass, func() error {
+	if _, err := r.CreateOrUpdate(ctx, r.managementClient, ec2NodeClass, func() error {
 		return reconcileEC2NodeClass(ec2NodeClass, openshiftEC2NodeClass, hcp, userDataSecret)
 	}); err != nil {
 		return ctrl.Result{}, err

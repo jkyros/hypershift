@@ -81,8 +81,7 @@ func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, man
 		func(ctx context.Context, o client.Object) []ctrl.Request {
 			// Only watch our Karpenter CRDs
 			switch o.GetName() {
-			case "ec2nodeclasses.karpenter.k8s.aws",
-				"nodepools.karpenter.sh",
+			case "nodepools.karpenter.sh",
 				"nodeclaims.karpenter.sh":
 				return []ctrl.Request{{NamespacedName: client.ObjectKey{Namespace: r.Namespace}}}
 			}
@@ -92,9 +91,15 @@ func (r *Reconciler) SetupWithManager(ctx context.Context, mgr ctrl.Manager, man
 		return fmt.Errorf("failed to watch CRDs: %w", err)
 	}
 
-	// Watch EC2NodeClass guest side.
-	if err := c.Watch(source.Kind(mgr.GetCache(), &awskarpenterv1.EC2NodeClass{},
-		&handler.TypedEnqueueRequestForObject[*awskarpenterv1.EC2NodeClass]{})); err != nil {
+	// Watch EC2NodeClass manager side
+	if err := c.Watch(source.Kind[client.Object](managementCluster.GetCache(), &awskarpenterv1.EC2NodeClass{}, handler.EnqueueRequestsFromMapFunc(
+		func(ctx context.Context, o client.Object) []ctrl.Request {
+			if o.GetNamespace() != r.Namespace {
+				return nil
+			}
+			return []ctrl.Request{{NamespacedName: client.ObjectKeyFromObject(o)}}
+		},
+	))); err != nil {
 		return fmt.Errorf("failed to watch EC2NodeClass: %w", err)
 	}
 
@@ -251,7 +256,6 @@ func (r *Reconciler) reconcileCRDs(ctx context.Context, onlyCreate bool) error {
 	var op controllerutil.OperationResult
 	var err error
 	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{
-		crdEC2NodeClass,
 		crdNodePool,
 		crdNodeClaim,
 	} {
@@ -271,6 +275,27 @@ func (r *Reconciler) reconcileCRDs(ctx context.Context, onlyCreate bool) error {
 
 		}
 	}
+
+	for _, crd := range []*apiextensionsv1.CustomResourceDefinition{
+		crdEC2NodeClass,
+	} {
+		if onlyCreate {
+			if err := r.ManagementClient.Create(ctx, crd); err != nil {
+				if !apierrors.IsAlreadyExists(err) {
+					errs = append(errs, err)
+				}
+			}
+		} else {
+			op, err = r.CreateOrUpdate(ctx, r.ManagementClient, crd, func() error {
+				return nil
+			})
+			if err != nil {
+				errs = append(errs, err)
+			}
+
+		}
+	}
+
 	if err := utilerrors.NewAggregate(errs); err != nil {
 		return fmt.Errorf("failed to reconcile CRDs: %w", err)
 	}

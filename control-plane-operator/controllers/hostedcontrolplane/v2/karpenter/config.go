@@ -51,12 +51,17 @@ mappings:
     priority: 150
   - group: "storage.k8s.io"
     version: "v1"
-    kind: "VolumeAttachment"
+    kind: "CSINode"
     kubeconfig: "/mnt/kubeconfig/target-kubeconfig"
     priority: 150
   - group: "apps"
     version: "v1"
     kind: "Deployment"
+    kubeconfig: "/mnt/kubeconfig/target-kubeconfig"
+    priority: 150
+  - group: "apps"
+    version: "v1"
+    kind: "DaemonSet"
     kubeconfig: "/mnt/kubeconfig/target-kubeconfig"
     priority: 150
 `, namespace)
