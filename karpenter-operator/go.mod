@@ -81,7 +81,6 @@ require (
 	github.com/google/cel-go v0.26.0 // indirect
 	github.com/google/gnostic-models v0.7.0 // indirect
 	github.com/google/go-cmp v0.7.0 // indirect
-	github.com/google/gofuzz v1.2.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/gophercloud/gophercloud/v2 v2.4.0 // indirect
 	github.com/gorilla/mux v1.8.1 // indirect
@@ -181,3 +180,8 @@ replace github.com/openshift/hypershift/api => ../api
 replace github.com/aws/karpenter-provider-aws => github.com/openshift/karpenter-provider-aws v0.0.0-20251120203802-3fcdd6f905e5
 
 replace github.com/kubernetes-sigs/karpenter => github.com/openshift/kubernetes-sigs-karpenter v0.0.0-20251120191159-5b85ce82e33d
+
+// TODO(jkyros): We can't move to CAPI 1.11 yet, and CAPI 1.10 has fuzzer incompatibility with 1.34 because
+// k8s.io/apimachinery/pkg/api/apitesting/fuzzer.FuzzerFor() now returns *randfill.Filler instead of *fuzz.Fuzzer, so I just
+// patched the fix into my "jkyros-fix-fuzzer" branch in the interim. DO NOT MERGE THIS :)
+replace sigs.k8s.io/cluster-api => github.com/jkyros/cluster-api v0.0.0-20251113202422-ab36b77c802b
