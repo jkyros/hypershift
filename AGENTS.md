@@ -123,12 +123,36 @@ This is a Go 1.24+ project using:
 - Various cloud provider SDKs (AWS, Azure, IBM)
 - OpenShift API dependencies
 
-The project uses vendoring (`go mod vendor`) and includes workspace configuration in `hack/workspace/`.
+### Multi-Module Architecture
+
+The project uses a multi-module architecture with separate Go modules:
+- **Main module** (`github.com/openshift/hypershift`): Core hypershift code
+- **API module** (`github.com/openshift/hypershift/api`): API types and CRDs
+- **Karpenter-operator module** (`github.com/openshift/hypershift/karpenter-operator`): Karpenter operator with independent dependencies
+
+This separation allows:
+- Independent versioning of Karpenter dependencies
+- Isolated vendor directories for better dependency management
+- Cleaner module boundaries
+
+The project uses vendoring (`go mod vendor`) for each module and includes workspace configuration in `hack/workspace/` for local development.
+
+### Working with Multiple Modules
+
+When updating dependencies:
+```bash
+make update              # Updates all modules (main, api, karpenter-operator)
+make api-deps            # Updates only api module dependencies
+make karpenter-deps      # Updates only karpenter-operator module dependencies
+make workspace-sync      # Syncs the Go workspace
+```
 
 ## Common Gotchas
 
 - Always run `make api` after modifying types in the `api/` package
 - Use `make verify` before submitting PRs to catch formatting/generation issues
+- When modifying karpenter-operator code, run `make karpenter-deps` to update its dependencies
+- The karpenter-operator has its own go.mod and vendor directory - update it separately from the main module
 - Platform-specific controllers require their respective cloud credentials for testing
 - E2E tests need proper cloud infrastructure setup (S3 buckets, DNS zones, etc.)
 

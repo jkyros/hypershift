@@ -7,8 +7,8 @@ import (
 	"runtime"
 
 	karpenteroperatorv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenteroperator"
-	karpenterassets "github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
 	hyperapi "github.com/openshift/hypershift/support/api"
+	"github.com/openshift/hypershift/support/karpenter"
 
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -66,7 +66,7 @@ func setupOperatorInfoMetric(managementCluster cluster.Cluster) error {
 
 	crmetrics.Registry.MustRegister(
 		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: karpenterassets.KarpenterOperatorInfoMetricName,
+			Name: karpenter.KarpenterOperatorInfoMetricName,
 			Help: "Metric to capture the current Karpenter Operator details in the control plane",
 			ConstLabels: prometheus.Labels{
 				"image":     image,

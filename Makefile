@@ -66,7 +66,7 @@ pre-commit: all verify test
 build: hypershift-operator control-plane-operator control-plane-pki-operator karpenter-operator hypershift product-cli
 
 .PHONY: update
-update: api-deps workspace-sync deps api api-docs clients
+update: api-deps karpenter-deps workspace-sync deps api api-docs clients
 
 $(GOLANGCI_LINT):$(TOOLS_DIR)/go.mod # Build golangci-lint from tools folder.
 	# Hack to install kuibe api linter plugin until https://github.com/kubernetes-sigs/kube-api-linter/pull/78 is merged
@@ -125,7 +125,7 @@ hypershift-operator:
 
 .PHONY: karpenter-operator
 karpenter-operator:
-	$(GO_BUILD_RECIPE) -o $(OUT_DIR)/karpenter-operator ./karpenter-operator
+	cd karpenter-operator && $(GO_BUILD_RECIPE) -o ../$(OUT_DIR)/karpenter-operator .
 
 .PHONY: karpenter-api
 karpenter-api:
@@ -316,6 +316,14 @@ deps:
 .PHONY: api-deps
 api-deps:
 	cd api && \
+	  $(GO) mod tidy && \
+	  $(GO) mod vendor && \
+	  $(GO) mod verify && \
+	  $(GO) list -m -mod=readonly -json all > /dev/null
+
+.PHONY: karpenter-deps
+karpenter-deps:
+	cd karpenter-operator && \
 	  $(GO) mod tidy && \
 	  $(GO) mod vendor && \
 	  $(GO) mod verify && \

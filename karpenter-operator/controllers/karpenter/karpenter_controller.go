@@ -13,6 +13,7 @@ import (
 	"github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
 	supportassets "github.com/openshift/hypershift/support/assets"
 	controlplanecomponent "github.com/openshift/hypershift/support/controlplane-component"
+	"github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/upsert"
 	"github.com/openshift/hypershift/support/util"
@@ -285,7 +286,7 @@ func (r *Reconciler) reconcileOpenshiftEC2NodeClassDefault(ctx context.Context, 
 	log := ctrl.LoggerFrom(ctx)
 
 	ec2NodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
-	ec2NodeClass.SetName(assets.EC2NodeClassDefault)
+	ec2NodeClass.SetName(karpenter.EC2NodeClassDefault)
 
 	op, err := r.CreateOrUpdate(ctx, r.GuestClient, ec2NodeClass, func() error {
 		ec2NodeClass.Spec = hyperkarpenterv1.OpenshiftEC2NodeClassSpec{

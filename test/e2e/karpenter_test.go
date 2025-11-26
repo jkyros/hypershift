@@ -19,7 +19,7 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	karpentercpov2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenter"
 	karpenteroperatorcpov2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenteroperator"
-	karpenterassets "github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
+	"github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 	dto "github.com/prometheus/client_model/go"
@@ -75,8 +75,8 @@ func TestKarpenter(t *testing.T) {
 
 		t.Run("Karpenter operator plumbing and smoketesting", func(t *testing.T) {
 			karpenterMetrics := []string{
-				karpenterassets.KarpenterBuildInfoMetricName,
-				karpenterassets.KarpenterOperatorInfoMetricName,
+				karpenter.KarpenterBuildInfoMetricName,
+				karpenter.KarpenterOperatorInfoMetricName,
 			}
 			operatorComponentName := karpenteroperatorcpov2.ComponentName
 			karpenterComponentName := karpentercpov2.ComponentName
