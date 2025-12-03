@@ -303,6 +303,13 @@ func (r *Reconciler) reconcileOpenshiftEC2NodeClassDefault(ctx context.Context, 
 					},
 				},
 			},
+			// Preserve user-configurable fields
+			Role:                ec2NodeClass.Spec.Role,
+			InstanceProfile:     ec2NodeClass.Spec.InstanceProfile,
+			Tags:                ec2NodeClass.Spec.Tags,
+			DetailedMonitoring:  ec2NodeClass.Spec.DetailedMonitoring,
+			BlockDeviceMappings: ec2NodeClass.Spec.BlockDeviceMappings,
+			InstanceStorePolicy: ec2NodeClass.Spec.InstanceStorePolicy,
 		}
 
 		if hcp.Annotations[hyperv1.AWSMachinePublicIPs] == "true" {
