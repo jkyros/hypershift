@@ -7,15 +7,19 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
 
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/service/ec2"
 	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	. "github.com/onsi/gomega"
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
 	karpentercpov2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenter"
 	karpenteroperatorcpov2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenteroperator"
 	karpenterassets "github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
@@ -26,7 +30,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	karpenterv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/yaml"
@@ -231,6 +237,103 @@ func TestKarpenter(t *testing.T) {
 			// Wait for Karpenter Nodes to go away.
 			t.Logf("Waiting for Karpenter Nodes to disappear")
 			_ = e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, 0, nodeLabels)
+		})
+
+		t.Run("Test custom instance profile", func(t *testing.T) {
+			g := NewWithT(t)
+
+			// Use the existing worker instance profile that's already created for the cluster
+			workerInstanceProfile := fmt.Sprintf("%s-worker", hostedCluster.Spec.InfraID)
+			t.Logf("Using existing worker instance profile: %s", workerInstanceProfile)
+
+			// Get the default OpenshiftEC2NodeClass
+			openshiftEC2NodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+			g.Expect(guestClient.Get(ctx, types.NamespacedName{Name: "default"}, openshiftEC2NodeClass)).To(Succeed())
+
+			// Update OpenshiftEC2NodeClass with instanceProfile
+			err := e2eutil.UpdateObject(t, ctx, guestClient, openshiftEC2NodeClass, func(obj *hyperkarpenterv1.OpenshiftEC2NodeClass) {
+				obj.Spec.InstanceProfile = ptr.To(workerInstanceProfile)
+			})
+			g.Expect(err).NotTo(HaveOccurred(), "failed to update OpenshiftEC2NodeClass with instance profile")
+			t.Logf("Updated OpenshiftEC2NodeClass with instanceProfile: %s", workerInstanceProfile)
+
+			// Verify it syncs to EC2NodeClass Spec
+			ec2NodeClass := &awskarpenterv1.EC2NodeClass{}
+			g.Eventually(func() *string {
+				if err := guestClient.Get(ctx, types.NamespacedName{Name: "default"}, ec2NodeClass); err != nil {
+					return nil
+				}
+				return ec2NodeClass.Spec.InstanceProfile
+			}, 2*time.Minute, 5*time.Second).Should(Equal(ptr.To(workerInstanceProfile)), "EC2NodeClass should have instanceProfile set in Spec")
+			t.Logf("Verified EC2NodeClass Spec has instanceProfile: %s", workerInstanceProfile)
+
+			// Verify it syncs to EC2NodeClass Status (this is what Karpenter actually uses)
+			g.Eventually(func() string {
+				if err := guestClient.Get(ctx, types.NamespacedName{Name: "default"}, ec2NodeClass); err != nil {
+					return ""
+				}
+				return ec2NodeClass.Status.InstanceProfile
+			}, 2*time.Minute, 5*time.Second).Should(Equal(workerInstanceProfile), "EC2NodeClass should have instanceProfile set in Status")
+			t.Logf("Verified EC2NodeClass Status has instanceProfile: %s", workerInstanceProfile)
+
+			// Create NodePool and workload
+			replicas := 1
+			workLoads.Object["spec"].(map[string]interface{})["replicas"] = replicas
+			workLoads.SetResourceVersion("")
+			karpenterNodePool.SetResourceVersion("")
+
+			defer guestClient.Delete(ctx, karpenterNodePool)
+			defer guestClient.Delete(ctx, workLoads)
+			g.Expect(guestClient.Create(ctx, karpenterNodePool)).To(Succeed())
+			t.Logf("Created Karpenter NodePool")
+			g.Expect(guestClient.Create(ctx, workLoads)).To(Succeed())
+			t.Logf("Created workloads")
+
+			// Wait for nodes to be ready
+			nodes := e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, int32(replicas), nodeLabels)
+			t.Logf("Karpenter provisioned %d node(s)", len(nodes))
+
+			// Verify instances have the correct instance profile via AWS API
+			ec2Client := e2eutil.GetEC2Client(clusterOpts.AWSPlatform.Credentials.AWSCredentialsFile, clusterOpts.AWSPlatform.Region)
+			instanceIDRegex := regexp.MustCompile(`(?P<Provider>.*):///(?P<AZ>.*)/(?P<InstanceID>.*)`)
+
+			for _, node := range nodes {
+				providerID := node.Spec.ProviderID
+				matches := instanceIDRegex.FindStringSubmatch(providerID)
+				g.Expect(matches).NotTo(BeNil(), "providerID should match expected format")
+
+				var instanceID string
+				for i, name := range instanceIDRegex.SubexpNames() {
+					if name == "InstanceID" {
+						instanceID = matches[i]
+						break
+					}
+				}
+				g.Expect(instanceID).NotTo(BeEmpty(), "should extract instance ID from providerID")
+
+				t.Logf("Verifying instance %s has instance profile %s", instanceID, workerInstanceProfile)
+
+				// Describe the instance to get its IAM instance profile
+				describeOutput, err := ec2Client.DescribeInstances(&ec2.DescribeInstancesInput{
+					InstanceIds: []*string{aws.String(instanceID)},
+				})
+				g.Expect(err).NotTo(HaveOccurred(), "should describe instance")
+				g.Expect(describeOutput.Reservations).NotTo(BeEmpty(), "should have at least one reservation")
+				g.Expect(describeOutput.Reservations[0].Instances).NotTo(BeEmpty(), "should have at least one instance")
+
+				instance := describeOutput.Reservations[0].Instances[0]
+				g.Expect(instance.IamInstanceProfile).NotTo(BeNil(), "instance should have IAM instance profile")
+
+				// Extract just the profile name from the ARN
+				// ARN format: arn:aws:iam::123456789012:instance-profile/profile-name
+				profileARN := aws.StringValue(instance.IamInstanceProfile.Arn)
+				profileName := profileARN[strings.LastIndex(profileARN, "/")+1:]
+
+				g.Expect(profileName).To(Equal(workerInstanceProfile), "instance should have the correct instance profile")
+				t.Logf("✓ Instance %s has correct instance profile: %s", instanceID, profileName)
+			}
+
+			t.Logf("Successfully verified all instances have the correct instance profile")
 		})
 
 		t.Run("Test basic provisioning and deprovising", func(t *testing.T) {
