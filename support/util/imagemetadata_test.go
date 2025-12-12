@@ -236,7 +236,7 @@ func TestGetDigest(t *testing.T) {
 			pullSecret:     pullSecret,
 			expectedErr:    false,
 			validateCache:  true,
-			expectedDigest: "sha256:fe9080e7b47dd0751812e64eb2510b0444b3706fbbe426c4e9372dd8a77141ee",
+			expectedDigest: "sha256:a8cd0aee0ab6eb4aba46546503182547bbc2e7f9c0d047043177f548978526fe",
 		},
 	}
 
