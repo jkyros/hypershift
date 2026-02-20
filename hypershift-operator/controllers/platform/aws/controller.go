@@ -2,6 +2,7 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -25,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go/service/elbv2"
 	"github.com/aws/aws-sdk-go/service/elbv2/elbv2iface"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -97,6 +99,9 @@ func (r *AWSEndpointServiceReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			DeleteFunc: r.enqueueOnNodePoolDelete(mgr),
 		}).
 		Watches(&hyperv1.HostedCluster{}, handler.Funcs{UpdateFunc: r.enqueueOnHostedClusterChange(mgr)}).
+		Watches(&corev1.ConfigMap{}, handler.Funcs{
+			UpdateFunc: r.enqueueOnKarpenterConfigMapChange(mgr),
+		}).
 		WithOptions(controller.Options{
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](3*time.Second, 30*time.Second),
 			MaxConcurrentReconciles: 10,
@@ -190,6 +195,37 @@ func (r *AWSEndpointServiceReconciler) enqueueOnHostedClusterChange(mgr ctrl.Man
 	}
 }
 
+func (r *AWSEndpointServiceReconciler) enqueueOnKarpenterConfigMapChange(mgr ctrl.Manager) func(context.Context, event.UpdateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	return func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+		logger := mgr.GetLogger()
+		newCM, isOk := e.ObjectNew.(*corev1.ConfigMap)
+		if !isOk {
+			logger.Info("WARNING: enqueueOnKarpenterConfigMapChange: new resource is not of type ConfigMap")
+			return
+		}
+		oldCM, isOk := e.ObjectOld.(*corev1.ConfigMap)
+		if !isOk {
+			logger.Info("WARNING: enqueueOnKarpenterConfigMapChange: old resource is not of type ConfigMap")
+			return
+		}
+
+		// Only process karpenter-subnets ConfigMap
+		labels := newCM.GetLabels()
+		if labels == nil || labels["hypershift.openshift.io/managed-by"] != "karpenter" || newCM.Name != "karpenter-subnets" {
+			return
+		}
+
+		// Only enqueue if subnet IDs actually changed
+		oldSubnets := oldCM.Data["subnetIDs"]
+		newSubnets := newCM.Data["subnetIDs"]
+		if oldSubnets != newSubnets {
+			for _, req := range awsEndpointServicesByName(newCM.Namespace) {
+				q.Add(req)
+			}
+		}
+	}
+}
+
 func (r *AWSEndpointServiceReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log, err := logr.FromContext(ctx)
 	if err != nil {
@@ -264,7 +300,7 @@ func (r *AWSEndpointServiceReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Reconcile the AWSEndpointService Spec
 	if _, err := r.CreateOrUpdate(ctx, r.Client, awsEndpointService, func() error {
-		return reconcileAWSEndpointService(ctx, r, awsEndpointService, hc)
+		return reconcileAWSEndpointService(ctx, r, r.ec2Client, awsEndpointService, hc)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile AWSEndpointService spec: %w", err)
 	}
@@ -309,21 +345,84 @@ func (r *AWSEndpointServiceReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-func reconcileAWSEndpointService(ctx context.Context, c client.Client, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
+func reconcileAWSEndpointService(ctx context.Context, c client.Client, ec2Client ec2iface.EC2API, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
 	if awsEndpointService.Annotations == nil {
 		awsEndpointService.Annotations = make(map[string]string)
 	}
 	awsEndpointService.Annotations[supportutil.HostedClusterAnnotation] = fmt.Sprintf("%s/%s", hc.Namespace, hc.Name)
-	return reconcileAWSEndpointServiceSubnetIDs(ctx, c, awsEndpointService, hc)
+	return reconcileAWSEndpointServiceSubnetIDs(ctx, c, ec2Client, awsEndpointService, hc)
 }
 
-func reconcileAWSEndpointServiceSubnetIDs(ctx context.Context, c client.Client, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
-	subnetIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace)
+func reconcileAWSEndpointServiceSubnetIDs(ctx context.Context, c client.Client, ec2Client ec2iface.EC2API, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
+	subnetIDs, err := listSubnetIDs(ctx, c, ec2Client, awsEndpointService.Status.EndpointServiceName, hc.Name, hc.Namespace)
 	if err != nil {
 		return fmt.Errorf("failed to list subnetIDs: %w", err)
 	}
+	// If no NodePool or Karpenter subnets are available yet, find a bootstrap subnet
+	// from the VPC that is in an AZ supported by the endpoint service. This allows
+	// CreateVpcEndpoint to succeed during initial cluster provisioning for Karpenter-only
+	// clusters (NodePoolReplicas=0) before any OpenshiftEC2NodeClass has been configured.
+	// Once Karpenter populates the karpenter-subnets ConfigMap, the ConfigMap watch
+	// will retrigger this reconcile and replace this with the real Karpenter subnets.
+	//
+	// We cannot use CloudProviderConfig.Subnet directly as a fallback because that subnet
+	// is in the zone the guest infra was created in (e.g. us-east-1a), which may not be
+	// supported by the endpoint service NLB (whose supported AZs are determined by the
+	// management cluster, not the guest cluster).
+	if len(subnetIDs) == 0 &&
+		ec2Client != nil &&
+		awsEndpointService.Status.EndpointServiceName != "" &&
+		hc.Spec.Platform.AWS != nil &&
+		hc.Spec.Platform.AWS.CloudProviderConfig != nil {
+		bootstrapSubnet, err := findBootstrapSubnet(ctx, ec2Client, awsEndpointService.Status.EndpointServiceName, hc.Spec.Platform.AWS.CloudProviderConfig.VPC)
+		if err != nil {
+			ctrl.LoggerFrom(ctx).Info("Could not find bootstrap subnet in a supported AZ, endpoint creation will be deferred", "error", err)
+		} else {
+			ctrl.LoggerFrom(ctx).Info("No NodePool or Karpenter subnets found, using bootstrap subnet", "subnetID", bootstrapSubnet)
+			subnetIDs = []string{bootstrapSubnet}
+		}
+	}
 	awsEndpointService.Spec.SubnetIDs = subnetIDs
 	return nil
+}
+
+// findBootstrapSubnet returns the ID of any available subnet in the given VPC whose
+// availability zone is supported by the named endpoint service. It is used as a
+// bootstrap subnet for CreateVpcEndpoint when no NodePool or Karpenter subnets exist yet.
+func findBootstrapSubnet(ctx context.Context, ec2Client ec2iface.EC2API, endpointServiceName, vpcID string) (string, error) {
+	// Determine which AZs the endpoint service supports.
+	svcOut, err := ec2Client.DescribeVpcEndpointServicesWithContext(ctx, &ec2.DescribeVpcEndpointServicesInput{
+		ServiceNames: aws.StringSlice([]string{endpointServiceName}),
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to describe endpoint service %s: %w", endpointServiceName, err)
+	}
+	if len(svcOut.ServiceDetails) == 0 {
+		return "", fmt.Errorf("endpoint service %s not found", endpointServiceName)
+	}
+	supportedAZs := sets.NewString()
+	for _, az := range svcOut.ServiceDetails[0].AvailabilityZones {
+		if az != nil {
+			supportedAZs.Insert(*az)
+		}
+	}
+
+	// Find any available subnet in the VPC that is in a supported AZ.
+	subnetsOut, err := ec2Client.DescribeSubnetsWithContext(ctx, &ec2.DescribeSubnetsInput{
+		Filters: []*ec2.Filter{
+			{Name: aws.String("vpc-id"), Values: aws.StringSlice([]string{vpcID})},
+			{Name: aws.String("state"), Values: aws.StringSlice([]string{"available"})},
+		},
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to describe subnets in VPC %s: %w", vpcID, err)
+	}
+	for _, s := range subnetsOut.Subnets {
+		if s.SubnetId != nil && s.AvailabilityZone != nil && supportedAZs.Has(*s.AvailabilityZone) {
+			return *s.SubnetId, nil
+		}
+	}
+	return "", fmt.Errorf("no subnet in VPC %s found in a supported AZ for endpoint service %s (supported AZs: %v)", vpcID, endpointServiceName, supportedAZs.List())
 }
 
 func listNodePools(ctx context.Context, c client.Client, nodePoolNamespace string, clusterName string) ([]hyperv1.NodePool, error) {
@@ -340,19 +439,124 @@ func listNodePools(ctx context.Context, c client.Client, nodePoolNamespace strin
 	return filtered, nil
 }
 
-func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNamespace string) ([]string, error) {
+func listSubnetIDs(ctx context.Context, c client.Client, ec2Client ec2iface.EC2API, endpointServiceName, clusterName, nodePoolNamespace string) ([]string, error) {
+	// Get subnets from NodePools
 	nodePools, err := listNodePools(ctx, c, nodePoolNamespace, clusterName)
 	if err != nil {
 		return nil, err
 	}
-	subnetIDs := []string{}
+	subnetIDSet := sets.NewString()
 	for _, nodePool := range nodePools {
 		if nodePool.Spec.Platform.AWS != nil &&
 			nodePool.Spec.Platform.AWS.Subnet.ID != nil {
-			subnetIDs = append(subnetIDs, *nodePool.Spec.Platform.AWS.Subnet.ID)
+			subnetIDSet.Insert(*nodePool.Spec.Platform.AWS.Subnet.ID)
 		}
 	}
+
+	// Get subnets from Karpenter ConfigMap
+	karpenterSubnets, err := listKarpenterSubnetIDs(ctx, c, nodePoolNamespace)
+	if err != nil {
+		// Log but don't fail - ConfigMap might not exist yet
+		ctrl.LoggerFrom(ctx).V(4).Info("Failed to get Karpenter subnets, continuing with NodePool subnets only", "error", err)
+	} else if len(karpenterSubnets) > 0 && endpointServiceName != "" && ec2Client != nil {
+		// Filter Karpenter subnets to only those in AZs supported by the endpoint service.
+		// Subnets in unsupported AZs would cause CreateVpcEndpoint/ModifyVpcEndpoint to fail.
+		filtered, filterErr := filterSubnetsByEndpointServiceAZs(ctx, ec2Client, endpointServiceName, karpenterSubnets)
+		if filterErr != nil {
+			ctrl.LoggerFrom(ctx).V(4).Info("Failed to filter Karpenter subnets by endpoint service AZs, using unfiltered list", "error", filterErr)
+			subnetIDSet.Insert(karpenterSubnets...)
+		} else {
+			subnetIDSet.Insert(filtered...)
+		}
+	} else {
+		subnetIDSet.Insert(karpenterSubnets...)
+	}
+
+	subnetIDs := subnetIDSet.List()
 	sort.Strings(subnetIDs)
+	return subnetIDs, nil
+}
+
+// filterSubnetsByEndpointServiceAZs returns the subset of candidateSubnetIDs whose
+// availability zone is supported by the given VPC endpoint service. Subnets in
+// unsupported AZs are dropped and a warning is logged so the problem is observable
+// in operator logs.
+func filterSubnetsByEndpointServiceAZs(ctx context.Context, ec2Client ec2iface.EC2API, endpointServiceName string, candidateSubnetIDs []string) ([]string, error) {
+	log := ctrl.LoggerFrom(ctx)
+
+	// Fetch the AZs that the endpoint service supports.
+	svcOut, err := ec2Client.DescribeVpcEndpointServicesWithContext(ctx, &ec2.DescribeVpcEndpointServicesInput{
+		ServiceNames: aws.StringSlice([]string{endpointServiceName}),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe vpc endpoint service %s: %w", endpointServiceName, err)
+	}
+	if len(svcOut.ServiceDetails) == 0 {
+		return nil, fmt.Errorf("vpc endpoint service %s not found", endpointServiceName)
+	}
+
+	supportedAZs := sets.NewString()
+	for _, az := range svcOut.ServiceDetails[0].AvailabilityZones {
+		if az != nil {
+			supportedAZs.Insert(*az)
+		}
+	}
+
+	// Fetch the AZ for each candidate subnet.
+	subnetOut, err := ec2Client.DescribeSubnetsWithContext(ctx, &ec2.DescribeSubnetsInput{
+		SubnetIds: aws.StringSlice(candidateSubnetIDs),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe subnets: %w", err)
+	}
+
+	subnetAZ := make(map[string]string, len(subnetOut.Subnets))
+	for _, s := range subnetOut.Subnets {
+		if s.SubnetId != nil && s.AvailabilityZone != nil {
+			subnetAZ[*s.SubnetId] = *s.AvailabilityZone
+		}
+	}
+
+	var kept []string
+	for _, subnetID := range candidateSubnetIDs {
+		az := subnetAZ[subnetID]
+		if supportedAZs.Has(az) {
+			kept = append(kept, subnetID)
+		} else {
+			log.Info("Karpenter subnet skipped: not in a supported AZ for endpoint service",
+				"subnetID", subnetID,
+				"subnetAZ", az,
+				"endpointServiceName", endpointServiceName,
+				"supportedAZs", supportedAZs.List(),
+			)
+		}
+	}
+	return kept, nil
+}
+
+func listKarpenterSubnetIDs(ctx context.Context, c client.Client, namespace string) ([]string, error) {
+	configMap := &corev1.ConfigMap{}
+	err := c.Get(ctx, client.ObjectKey{
+		Namespace: namespace,
+		Name:      "karpenter-subnets",
+	}, configMap)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return []string{}, nil // Not an error
+		}
+		return nil, fmt.Errorf("failed to get karpenter subnets configmap: %w", err)
+	}
+
+	subnetIDsJSON := configMap.Data["subnetIDs"]
+	if subnetIDsJSON == "" {
+		return []string{}, nil
+	}
+
+	var subnetIDs []string
+	if err := json.Unmarshal([]byte(subnetIDsJSON), &subnetIDs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal subnet IDs: %w", err)
+	}
+
 	return subnetIDs, nil
 }
 

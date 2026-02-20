@@ -2,6 +2,7 @@ package nodeclass
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -28,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 
@@ -155,6 +157,12 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 		}
 
+		// Update ConfigMap to remove this OpenshiftEC2NodeClass's subnets.
+		// This handles the case where other OpenshiftEC2NodeClass resources still exist.
+		if err := r.reconcileKarpenterSubnetsConfigMap(ctx, hcp); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile karpenter subnets configmap during deletion: %w", err)
+		}
+
 		if controllerutil.ContainsFinalizer(openshiftEC2NodeClass, finalizer) {
 			original := openshiftEC2NodeClass.DeepCopy()
 			controllerutil.RemoveFinalizer(openshiftEC2NodeClass, finalizer)
@@ -192,6 +200,10 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if err := r.reconcileStatus(ctx, ec2NodeClass, openshiftEC2NodeClass); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileKarpenterSubnetsConfigMap(ctx, hcp); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile karpenter subnets configmap: %w", err)
 	}
 
 	if err := r.reconcileVAP(ctx); err != nil {
@@ -346,6 +358,85 @@ func (r *EC2NodeClassReconciler) reconcileStatus(ctx context.Context, ec2NodeCla
 	}
 
 	log.Info("Reconciled OpenshiftEC2NodeClass status")
+	return nil
+}
+
+func (r *EC2NodeClassReconciler) reconcileKarpenterSubnetsConfigMap(ctx context.Context, hcp *hyperv1.HostedControlPlane) error {
+	log := ctrl.LoggerFrom(ctx)
+
+	// List all OpenshiftEC2NodeClass resources in guest cluster
+	openshiftEC2NodeClassList := &hyperkarpenterv1.OpenshiftEC2NodeClassList{}
+	if err := r.guestClient.List(ctx, openshiftEC2NodeClassList); err != nil {
+		return fmt.Errorf("failed to list OpenshiftEC2NodeClass: %w", err)
+	}
+
+	// Aggregate subnet IDs from all statuses
+	subnetIDSet := sets.NewString()
+	for _, nodeClass := range openshiftEC2NodeClassList.Items {
+		for _, subnet := range nodeClass.Status.Subnets {
+			if subnet.ID != "" {
+				subnetIDSet.Insert(subnet.ID)
+			}
+		}
+	}
+
+	subnetIDs := subnetIDSet.List() // Sorted list
+
+	// If there are no more OpenshiftEC2NodeClass resources, delete the ConfigMap
+	// (though it will also be cleaned up automatically via owner reference when HCP is deleted)
+	if len(openshiftEC2NodeClassList.Items) == 0 {
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "karpenter-subnets",
+				Namespace: r.Namespace,
+			},
+		}
+		err := r.managementClient.Delete(ctx, configMap)
+		if err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete karpenter subnets configmap: %w", err)
+		}
+		log.Info("Deleted karpenter subnets configmap (no OpenshiftEC2NodeClass resources remain)")
+		return nil
+	}
+
+	// Create or update ConfigMap in management cluster
+	configMap := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "karpenter-subnets",
+			Namespace: r.Namespace,
+		},
+	}
+
+	_, err := r.CreateOrUpdate(ctx, r.managementClient, configMap, func() error {
+		// Set owner reference to HostedControlPlane for automatic cleanup
+		ownerRef := config.OwnerRefFrom(hcp)
+		ownerRef.ApplyTo(configMap)
+
+		if configMap.Labels == nil {
+			configMap.Labels = make(map[string]string)
+		}
+		configMap.Labels["hypershift.openshift.io/managed-by"] = "karpenter"
+		configMap.Labels["hypershift.openshift.io/infra-id"] = hcp.Spec.InfraID
+
+		if configMap.Data == nil {
+			configMap.Data = make(map[string]string)
+		}
+
+		// Store as JSON array
+		subnetIDsJSON, err := json.Marshal(subnetIDs)
+		if err != nil {
+			return fmt.Errorf("failed to marshal subnet IDs: %w", err)
+		}
+		configMap.Data["subnetIDs"] = string(subnetIDsJSON)
+
+		return nil
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to reconcile karpenter subnets configmap: %w", err)
+	}
+
+	log.Info("Reconciled karpenter subnets configmap", "subnetCount", len(subnetIDs))
 	return nil
 }
 
