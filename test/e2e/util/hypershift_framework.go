@@ -134,7 +134,7 @@ func (h *hypershiftTest) Execute(opts *PlatformAgnosticOptions, platform hyperv1
 		})
 	}
 
-	h.after(hostedCluster, platform)
+	h.after(hostedCluster, opts, platform)
 
 	if h.Failed() {
 		numNodes := opts.ExpectedNodeCount()
@@ -187,7 +187,7 @@ func (h *hypershiftTest) before(hostedCluster *hyperv1.HostedCluster, opts *Plat
 }
 
 // runs after each test.
-func (h *hypershiftTest) after(hostedCluster *hyperv1.HostedCluster, platform hyperv1.PlatformType) {
+func (h *hypershiftTest) after(hostedCluster *hyperv1.HostedCluster, opts *PlatformAgnosticOptions, platform hyperv1.PlatformType) {
 	if h.Failed() {
 		// skip if Main failed
 		return
@@ -226,8 +226,14 @@ func (h *hypershiftTest) after(hostedCluster *hyperv1.HostedCluster, platform hy
 			hcmetrics.LimitedSupportEnabledMetricName,
 			hcmetrics.ProxyMetricName,
 			HypershiftOperatorInfoName,
-			npmetrics.SizeMetricName,
-			npmetrics.AvailableReplicasMetricName,
+		}
+		// NodePoolReplicas=-1 skips NodePool creation entirely (cmd/cluster/core/create.go).
+		// When no NodePools exist, the NodePool metrics are never emitted.
+		if opts.NodePoolReplicas >= 0 {
+			metricsToValidate = append(metricsToValidate,
+				npmetrics.SizeMetricName,
+				npmetrics.AvailableReplicasMetricName,
+			)
 		}
 		AWSMetrics := []string{hcmetrics.InvalidAwsCredsMetricName}
 
