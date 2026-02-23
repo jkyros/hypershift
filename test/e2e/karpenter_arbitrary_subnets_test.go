@@ -17,9 +17,11 @@ import (
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 // TestKarpenterArbitrarySubnets validates the full end-to-end path for Karpenter-driven
@@ -241,11 +243,50 @@ func TestKarpenterArbitrarySubnets(t *testing.T) {
 			g.Expect(err).NotTo(HaveOccurred(), "AWSEndpointService should include the Karpenter subnet in Spec.SubnetIDs")
 			t.Logf("AWSEndpointService.Spec.SubnetIDs includes Karpenter subnet: %s", arbitrarySubnetID)
 
+			// Step 9: Provision a Karpenter node so the framework's EnsureHostedCluster
+			// post-validation phase finds a real worker node and cluster operators can converge.
+			// The default OpenshiftEC2NodeClass ("default") is created automatically by AutoNode.
+			// We reuse the existing assets from TestKarpenter.
+			t.Logf("Creating Karpenter NodePool and workload to provision a worker node")
+			karpenterNodePool := &unstructured.Unstructured{}
+			yamlFile, err := content.ReadFile("assets/karpenter-nodepool.yaml")
+			g.Expect(err).NotTo(HaveOccurred(), "should read karpenter-nodepool.yaml")
+			g.Expect(yaml.Unmarshal(yamlFile, karpenterNodePool)).To(Succeed())
+
+			workLoads := &unstructured.Unstructured{}
+			yamlFile, err = content.ReadFile("assets/karpenter-workloads.yaml")
+			g.Expect(err).NotTo(HaveOccurred(), "should read karpenter-workloads.yaml")
+			g.Expect(yaml.Unmarshal(yamlFile, workLoads)).To(Succeed())
+			// Override replicas to 1 so Karpenter provisions exactly one node.
+			// The YAML default is 3 (with podAntiAffinity), which would cause
+			// WaitForReadyNodesByLabels to fail since it checks for an exact count.
+			workLoads.Object["spec"].(map[string]interface{})["replicas"] = 1
+
+			g.Expect(guestClient.Create(ctx, karpenterNodePool)).To(Succeed())
+			// DO NOT defer-delete the NodePool: PublicAndPrivate clusters are treated as
+			// private by IsPrivateHC(), so EnsureHostedCluster skips the node-list check
+			// and defaults hasWorkerNodes=true. If the NodePool is deleted here (end of
+			// Main), Karpenter terminates the node before EnsureHostedCluster runs, and
+			// ValidateHostedClusterConditions times out waiting for cluster operators that
+			// need worker nodes. The framework tears down the whole HostedCluster during
+			// Teardown, so no cleanup is needed here.
+			// defer func() { _ = guestClient.Delete(ctx, karpenterNodePool) }()
+			g.Expect(guestClient.Create(ctx, workLoads)).To(Succeed())
+			// defer func() { _ = guestClient.Delete(ctx, workLoads) }()
+
+			nodeLabels := map[string]string{
+				"node.kubernetes.io/instance-type": "t3.large",
+				"karpenter.sh/nodepool":            karpenterNodePool.GetName(),
+			}
+			t.Logf("Waiting for a Karpenter node to become ready")
+			e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, 1, nodeLabels)
+			t.Logf("Karpenter node is ready")
+
 			// Cleanup: delete the OpenshiftEC2NodeClass
 			t.Logf("Cleaning up OpenshiftEC2NodeClass")
 			g.Expect(guestClient.Delete(ctx, openshiftEC2NodeClass)).To(Succeed())
 
-			// Step 9: Verify ConfigMap cleanup when all OpenshiftEC2NodeClasses are deleted.
+			// Step 10: Verify ConfigMap cleanup when all OpenshiftEC2NodeClasses are deleted.
 			// List remaining NodeClasses to determine if we were the last one.
 			nodeClassList := &hyperkarpenterv1.OpenshiftEC2NodeClassList{}
 			err = guestClient.List(ctx, nodeClassList)
