@@ -101,6 +101,7 @@ func (r *AWSEndpointServiceReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		}).
 		Watches(&hyperv1.HostedCluster{}, handler.Funcs{UpdateFunc: r.enqueueOnHostedClusterChange(mgr)}).
 		Watches(&corev1.ConfigMap{}, handler.Funcs{
+			CreateFunc: r.enqueueOnKarpenterConfigMapCreate(mgr),
 			UpdateFunc: r.enqueueOnKarpenterConfigMapChange(mgr),
 		}).
 		WithOptions(controller.Options{
@@ -223,6 +224,24 @@ func (r *AWSEndpointServiceReconciler) enqueueOnKarpenterConfigMapChange(mgr ctr
 			for _, req := range awsEndpointServicesByName(newCM.Namespace) {
 				q.Add(req)
 			}
+		}
+	}
+}
+
+func (r *AWSEndpointServiceReconciler) enqueueOnKarpenterConfigMapCreate(mgr ctrl.Manager) func(context.Context, event.CreateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	return func(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+		logger := mgr.GetLogger()
+		cm, isOk := e.Object.(*corev1.ConfigMap)
+		if !isOk {
+			logger.Info("WARNING: enqueueOnKarpenterConfigMapCreate: resource is not of type ConfigMap")
+			return
+		}
+		labels := cm.GetLabels()
+		if labels == nil || labels["hypershift.openshift.io/managed-by"] != "karpenter" || cm.Name != karpenterutil.KarpenterSubnetsConfigMapName {
+			return
+		}
+		for _, req := range awsEndpointServicesByName(cm.Namespace) {
+			q.Add(req)
 		}
 	}
 }
@@ -355,7 +374,7 @@ func reconcileAWSEndpointService(ctx context.Context, c client.Client, ec2Client
 }
 
 func reconcileAWSEndpointServiceSubnetIDs(ctx context.Context, c client.Client, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
-	subnetIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace)
+	subnetIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace, awsEndpointService.Namespace)
 	if err != nil {
 		return fmt.Errorf("failed to list subnetIDs: %w", err)
 	}
@@ -378,7 +397,7 @@ func listNodePools(ctx context.Context, c client.Client, nodePoolNamespace strin
 	return filtered, nil
 }
 
-func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNamespace string) ([]string, error) {
+func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNamespace, hcpNamespace string) ([]string, error) {
 	// Get subnets from NodePools
 	nodePools, err := listNodePools(ctx, c, nodePoolNamespace, clusterName)
 	if err != nil {
@@ -392,8 +411,10 @@ func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNa
 		}
 	}
 
-	// Get subnets from Karpenter ConfigMap
-	karpenterSubnets, err := listKarpenterSubnetIDs(ctx, c, nodePoolNamespace)
+	// Get subnets from Karpenter ConfigMap.
+	// The ConfigMap is created by the Karpenter operator in the HCP namespace,
+	// which is distinct from the HC/NodePool namespace.
+	karpenterSubnets, err := listKarpenterSubnetIDs(ctx, c, hcpNamespace)
 	if err != nil {
 		// Log but don't fail - ConfigMap might not exist yet
 		ctrl.LoggerFrom(ctx).V(4).Info("Failed to get Karpenter subnets, continuing with NodePool subnets only", "error", err)

@@ -32,7 +32,6 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
-	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/wait"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	karpenterv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
@@ -60,7 +59,7 @@ func TestKarpenter(t *testing.T) {
 		subnetClusterOpts := globalOpts.DefaultClusterOptions(t)
 		subnetClusterOpts.AWSPlatform.AutoNode = true
 		subnetClusterOpts.ControlPlaneAvailabilityPolicy = string(hyperv1.SingleReplica)
-		subnetClusterOpts.NodePoolReplicas = 0
+		subnetClusterOpts.NodePoolReplicas = -1
 		subnetClusterOpts.AWSPlatform.EndpointAccess = string(hyperv1.PublicAndPrivate)
 
 		e2eutil.NewHypershiftTest(t, ctx, func(t *testing.T, g Gomega, mgtClient crclient.Client, hostedCluster *hyperv1.HostedCluster) {
@@ -74,9 +73,9 @@ func TestKarpenter(t *testing.T) {
 
 				hcpNamespace := fmt.Sprintf("%s-%s", hostedCluster.Namespace, hostedCluster.Name)
 
-				// Step 1: Wait for an AWSEndpointService to have a populated EndpointServiceName
-				// so we can look up its supported AZs. Both kube-apiserver-private and
-				// private-router are backed by NLBs in the same AZs, so either will do.
+				// Step 1: Wait for an AWSEndpointService to have a populated EndpointServiceName.
+				// This is a readiness gate — it proves the NLB and endpoint service infrastructure
+				// is up before we proceed. Either kube-apiserver-private or private-router will do.
 				t.Logf("Waiting for AWSEndpointService to populate EndpointServiceName in namespace: %s", hcpNamespace)
 				var endpointServiceName string
 				err := wait.PollUntilContextTimeout(ctx, 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
@@ -95,23 +94,14 @@ func TestKarpenter(t *testing.T) {
 				g.Expect(err).NotTo(HaveOccurred(), "AWSEndpointService should have a populated EndpointServiceName")
 				t.Logf("Found endpoint service: %s", endpointServiceName)
 
-				// Step 2: Query the supported AZs for that endpoint service.
-				svcOut, err := ec2client.DescribeVpcEndpointServicesWithContext(ctx, &ec2.DescribeVpcEndpointServicesInput{
-					ServiceNames: []*string{aws.String(endpointServiceName)},
-				})
-				g.Expect(err).NotTo(HaveOccurred(), "failed to describe VPC endpoint services")
-				g.Expect(svcOut.ServiceDetails).NotTo(BeEmpty(), "endpoint service should have details")
-
-				supportedAZs := sets.NewString()
-				for _, az := range svcOut.ServiceDetails[0].AvailabilityZones {
-					supportedAZs.Insert(aws.StringValue(az))
-				}
-				t.Logf("Endpoint service supported AZs: %v", supportedAZs.List())
-
-				// Step 3: Find a VPC subnet in a supported AZ.
-				// This ensures ModifyVpcEndpoint won't fail with an AZ mismatch error.
+				// Step 2: Find any available subnet in the VPC.
+				// With NodePoolReplicas=-1, no NodePool objects exist, so the Karpenter ConfigMap
+				// is the only pipeline that can put a subnet into AWSEndpointService.Spec.SubnetIDs.
+				// We only check Spec.SubnetIDs (not AWSEndpointAvailable=True), so AZ compatibility
+				// with the endpoint service does not matter here — the controller writes Spec.SubnetIDs
+				// from the ConfigMap regardless.
 				vpcID := hostedCluster.Spec.Platform.AWS.CloudProviderConfig.VPC
-				t.Logf("Finding subnet in a supported AZ in VPC: %s", vpcID)
+				t.Logf("Finding a subnet in VPC: %s", vpcID)
 
 				subnetsOutput, err := ec2client.DescribeSubnetsWithContext(ctx, &ec2.DescribeSubnetsInput{
 					Filters: []*ec2.Filter{
@@ -128,17 +118,9 @@ func TestKarpenter(t *testing.T) {
 				g.Expect(err).NotTo(HaveOccurred(), "failed to describe subnets")
 				g.Expect(subnetsOutput.Subnets).NotTo(BeEmpty(), "VPC should have at least one subnet")
 
-				var arbitrarySubnet *ec2.Subnet
-				for _, s := range subnetsOutput.Subnets {
-					if supportedAZs.Has(aws.StringValue(s.AvailabilityZone)) {
-						arbitrarySubnet = s
-						break
-					}
-				}
-				g.Expect(arbitrarySubnet).NotTo(BeNil(), "VPC should have at least one subnet in a supported AZ (%v)", supportedAZs.List())
-
+				arbitrarySubnet := subnetsOutput.Subnets[0]
 				arbitrarySubnetID := aws.StringValue(arbitrarySubnet.SubnetId)
-				t.Logf("Using arbitrary subnet: %s in AZ: %s", arbitrarySubnetID, aws.StringValue(arbitrarySubnet.AvailabilityZone))
+				t.Logf("Using subnet: %s in AZ: %s", arbitrarySubnetID, aws.StringValue(arbitrarySubnet.AvailabilityZone))
 
 				// Step 4: Get the guest client to create OpenshiftEC2NodeClass resources.
 				guestClient := e2eutil.WaitForGuestClient(t, ctx, mgtClient, hostedCluster)
@@ -220,24 +202,31 @@ func TestKarpenter(t *testing.T) {
 				// This proves the full pipeline: OpenshiftEC2NodeClass → ConfigMap → AWSEndpointService.
 				// We check Spec.SubnetIDs rather than waiting for AWSEndpointAvailable=True to avoid
 				// prolonging the test with the AWS-side endpoint modification round-trip.
-				t.Logf("Waiting for AWSEndpointService to include subnet %s in Spec.SubnetIDs", arbitrarySubnetID)
+				//
+				// Note: which AWSEndpointServices exist depends on the cluster's EndpointAccess mode
+				// and KAS publishing strategy. For PublicAndPrivate+Route (common in CI), only
+				// private-router exists. For PublicAndPrivate+LoadBalancer or Private, both
+				// kube-apiserver-private and private-router exist. We check all of them rather than
+				// hardcoding a name that may not be present in every configuration.
+				t.Logf("Waiting for any AWSEndpointService to include subnet %s in Spec.SubnetIDs", arbitrarySubnetID)
+				var matchedEPS string
 				err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
-					eps := &hyperv1.AWSEndpointService{}
-					if err := mgtClient.Get(ctx, crclient.ObjectKey{
-						Namespace: hcpNamespace,
-						Name:      "kube-apiserver-private",
-					}, eps); err != nil {
+					epsList := &hyperv1.AWSEndpointServiceList{}
+					if err := mgtClient.List(ctx, epsList, crclient.InNamespace(hcpNamespace)); err != nil {
 						return false, nil
 					}
-					for _, id := range eps.Spec.SubnetIDs {
-						if id == arbitrarySubnetID {
-							return true, nil
+					for _, eps := range epsList.Items {
+						for _, id := range eps.Spec.SubnetIDs {
+							if id == arbitrarySubnetID {
+								matchedEPS = eps.Name
+								return true, nil
+							}
 						}
 					}
 					return false, nil
 				})
-				g.Expect(err).NotTo(HaveOccurred(), "AWSEndpointService should include the Karpenter subnet in Spec.SubnetIDs")
-				t.Logf("AWSEndpointService.Spec.SubnetIDs includes Karpenter subnet: %s", arbitrarySubnetID)
+				g.Expect(err).NotTo(HaveOccurred(), "at least one AWSEndpointService should include the Karpenter subnet in Spec.SubnetIDs")
+				t.Logf("AWSEndpointService %q Spec.SubnetIDs includes Karpenter subnet: %s", matchedEPS, arbitrarySubnetID)
 
 				// Step 9: Provision a Karpenter node so the framework's EnsureHostedCluster
 				// post-validation phase finds a real worker node and cluster operators can converge.

@@ -2856,8 +2856,14 @@ func ValidatePublicCluster(t *testing.T, ctx context.Context, client crclient.Cl
 		}
 	}
 
-	// Wait for Nodes to be Ready
-	numNodes := clusterOpts.NodePoolReplicas * int32(len(clusterOpts.AWSPlatform.Zones))
+	// Wait for Nodes to be Ready.
+	// NodePoolReplicas=-1 means no NodePool objects are created (skipped in create.go).
+	// Treat negative values as 0 so we don't wait for an impossible node count.
+	replicas := clusterOpts.NodePoolReplicas
+	if replicas < 0 {
+		replicas = 0
+	}
+	numNodes := replicas * int32(len(clusterOpts.AWSPlatform.Zones))
 	WaitForNReadyNodes(t, ctx, guestClient, numNodes, hostedCluster.Spec.Platform.Type)
 
 	// rollout will not complete if there are no worker nodes.
