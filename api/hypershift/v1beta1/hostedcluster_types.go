@@ -1879,6 +1879,7 @@ type HostedClusterStatus struct {
 	Platform *PlatformStatus `json:"platform,omitempty"`
 
 	// autoNode contains the observed state of the AutoNode (Karpenter) provisioner.
+	// +openshift:enable:FeatureGate=AutoNodeKarpenter
 	// +optional
 	AutoNode *AutoNodeStatus `json:"autoNode,omitempty"`
 

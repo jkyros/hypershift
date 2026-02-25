@@ -8,6 +8,7 @@ import (
 	"github.com/openshift/hypershift/control-plane-operator/hostedclusterconfigoperator/operator"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/util/workqueue"
 
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -30,7 +31,7 @@ func Setup(ctx context.Context, opts *operator.HostedClusterConfigOperatorConfig
 		For(&corev1.Node{}).
 		Watches(&karpenterv1.NodeClaim{}, handler.EnqueueRequestsFromMapFunc(
 			func(_ context.Context, _ client.Object) []reconcile.Request {
-				return []reconcile.Request{{}}
+				return []reconcile.Request{{NamespacedName: types.NamespacedName{Name: ControllerName}}}
 			},
 		)).
 		WithOptions(controller.Options{

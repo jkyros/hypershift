@@ -54,6 +54,8 @@ func (r *reconciler) Reconcile(ctx context.Context, _ reconcile.Request) (reconc
 		return ctrl.Result{}, fmt.Errorf("failed to get Nodes: %w", err)
 	}
 
+	// NodeCount includes all guest cluster nodes, including those managed by Karpenter.
+	// AutoNode.NodeCount is the Karpenter-managed subset; subtract to get non-Karpenter nodes.
 	statusCfg := hypershiftv1beta1applyconfigurations.HostedControlPlaneStatus().WithNodeCount(len(nodes.Items))
 
 	if karpenterutil.IsKarpenterEnabled(hcp.Spec.AutoNode) {
@@ -93,7 +95,14 @@ func (r *reconciler) reconcileAutoNodeStatus(ctx context.Context, allNodes []cor
 		return nil, fmt.Errorf("failed to list NodeClaims: %w", err)
 	}
 
+	liveNodeClaimCount := 0
+	for i := range nodeClaims.Items {
+		if nodeClaims.Items[i].DeletionTimestamp == nil {
+			liveNodeClaimCount++
+		}
+	}
+
 	return hypershiftv1beta1applyconfigurations.AutoNodeStatus().
 		WithNodeCount(karpenterNodeCount).
-		WithNodeClaimCount(len(nodeClaims.Items)), nil
+		WithNodeClaimCount(liveNodeClaimCount), nil
 }

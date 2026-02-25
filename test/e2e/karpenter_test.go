@@ -197,11 +197,11 @@ func TestKarpenter(t *testing.T) {
 						if hc.Status.AutoNode == nil {
 							return false, "Status.AutoNode is nil", nil
 						}
-						if hc.Status.AutoNode.NodeCount == nil || *hc.Status.AutoNode.NodeCount < 1 {
-							return false, fmt.Sprintf("expected NodeCount >= 1, got %v", hc.Status.AutoNode.NodeCount), nil
+						if hc.Status.AutoNode.NodeCount == nil || *hc.Status.AutoNode.NodeCount < len(nodes) {
+							return false, fmt.Sprintf("expected NodeCount >= %d, got %v", len(nodes), hc.Status.AutoNode.NodeCount), nil
 						}
-						if hc.Status.AutoNode.NodeClaimCount == nil || *hc.Status.AutoNode.NodeClaimCount < 1 {
-							return false, fmt.Sprintf("expected NodeClaimCount >= 1, got %v", hc.Status.AutoNode.NodeClaimCount), nil
+						if hc.Status.AutoNode.NodeClaimCount == nil || *hc.Status.AutoNode.NodeClaimCount < len(nodeClaims.Items) {
+							return false, fmt.Sprintf("expected NodeClaimCount >= %d, got %v", len(nodeClaims.Items), hc.Status.AutoNode.NodeClaimCount), nil
 						}
 						return true, fmt.Sprintf("AutoNode status: NodeCount=%d, NodeClaimCount=%d",
 							*hc.Status.AutoNode.NodeCount, *hc.Status.AutoNode.NodeClaimCount), nil

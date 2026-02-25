@@ -92,6 +92,7 @@ func TestReconcileAutoNodeStatus_WhenMultipleKarpenterNodesItShouldCountAllWithL
 	status, err := r.reconcileAutoNodeStatus(context.Background(), nodes)
 
 	g.Expect(err).ToNot(HaveOccurred())
+	g.Expect(status).ToNot(BeNil())
 	g.Expect(status.NodeCount).To(Equal(ptr.To(2)))
 	g.Expect(status.NodeClaimCount).To(Equal(ptr.To(0)))
 }

@@ -7732,11 +7732,13 @@ spec:
                     description: |-
                       nodeClaimCount is the total number of NodeClaims managed by Karpenter.
                       This represents what Karpenter intends to provision, whether or not the node object exists yet.
+                    minimum: 0
                     type: integer
                   nodeCount:
                     description: |-
                       nodeCount is the number of nodes fully provisioned by Karpenter.
                       These are node objects that exist in the cluster and carry the karpenter.sh/nodepool label.
+                    minimum: 0
                     type: integer
                 type: object
               conditions:

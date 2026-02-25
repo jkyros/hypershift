@@ -13,16 +13,22 @@ limitations under the License.
 package hostedcluster
 
 import (
+	"context"
 	"fmt"
+	"strings"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	karpenterv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenter"
 	karpenteroperatorv2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenteroperator"
 	controlplanecomponent "github.com/openshift/hypershift/support/controlplane-component"
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/upsert"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 func (r *HostedClusterReconciler) reconcileKarpenterOperator(cpContext controlplanecomponent.ControlPlaneContext, createOrUpdate upsert.CreateOrUpdateFN, hcluster *hyperv1.HostedCluster, hypershiftOperatorImage, controlPlaneOperatorImage string) error {
@@ -74,4 +80,90 @@ spec:
 	}
 
 	return nil
+}
+
+// reconcileAutoNodeEnabledCondition returns the AutoNodeEnabled condition reflecting both the desired
+// state (spec) and the actual rollout progress of the Karpenter ControlPlaneComponent resources.
+//
+// States:
+//   - True  / AsExpected          — Karpenter enabled in spec AND both components fully rolled out.
+//   - False / AutoNodeProgressing — Enable or disable operation is in progress.
+//   - False / AutoNodeNotConfigured — Karpenter not in spec AND no components present.
+func (r *HostedClusterReconciler) reconcileAutoNodeEnabledCondition(ctx context.Context, hcluster *hyperv1.HostedCluster, hcpNamespace string) metav1.Condition {
+	condition := metav1.Condition{
+		Type:               string(hyperv1.AutoNodeEnabled),
+		ObservedGeneration: hcluster.Generation,
+	}
+
+	karpenterEnabled := karpenterutil.IsKarpenterEnabled(hcluster.Spec.AutoNode)
+
+	// List all ControlPlaneComponent resources in the HCP namespace and pick out the Karpenter ones.
+	componentList := &hyperv1.ControlPlaneComponentList{}
+	if err := r.Client.List(ctx, componentList, client.InNamespace(hcpNamespace)); err != nil {
+		// Cannot determine component state; fall back to spec-only logic.
+		if karpenterEnabled {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = hyperv1.AutoNodeProgressingReason
+			condition.Message = "AutoNode (Karpenter) is being enabled: waiting for components"
+		} else {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = hyperv1.AutoNodeNotConfiguredReason
+			condition.Message = "AutoNode provisioner is not configured"
+		}
+		return condition
+	}
+
+	var karpenterComponents []hyperv1.ControlPlaneComponent
+	for _, c := range componentList.Items {
+		if c.Name == karpenteroperatorv2.ComponentName || c.Name == karpenterv2.ComponentName {
+			karpenterComponents = append(karpenterComponents, c)
+		}
+	}
+
+	if karpenterEnabled {
+		if len(karpenterComponents) < 2 {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = hyperv1.AutoNodeProgressingReason
+			condition.Message = "AutoNode (Karpenter) is being enabled: waiting for components to be created"
+			return condition
+		}
+		var notReady []string
+		for _, c := range karpenterComponents {
+			rollout := meta.FindStatusCondition(c.Status.Conditions, string(hyperv1.ControlPlaneComponentRolloutComplete))
+			if rollout == nil || rollout.Status != metav1.ConditionTrue {
+				msg := "not rolled out"
+				if rollout != nil {
+					msg = rollout.Message
+				}
+				notReady = append(notReady, fmt.Sprintf("%s: %s", c.Name, msg))
+			}
+		}
+		if len(notReady) > 0 {
+			condition.Status = metav1.ConditionFalse
+			condition.Reason = hyperv1.AutoNodeProgressingReason
+			condition.Message = fmt.Sprintf("AutoNode (Karpenter) is being enabled: %s", strings.Join(notReady, "; "))
+			return condition
+		}
+		condition.Status = metav1.ConditionTrue
+		condition.Reason = hyperv1.AsExpectedReason
+		condition.Message = "AutoNode (Karpenter) is ready"
+		return condition
+	}
+
+	// Karpenter not enabled — check if components are still being removed.
+	if len(karpenterComponents) > 0 {
+		var names []string
+		for _, c := range karpenterComponents {
+			names = append(names, c.Name)
+		}
+		condition.Status = metav1.ConditionFalse
+		condition.Reason = hyperv1.AutoNodeProgressingReason
+		condition.Message = fmt.Sprintf("AutoNode (Karpenter) is being disabled: waiting for components to be removed: %s", strings.Join(names, ", "))
+		return condition
+	}
+
+	condition.Status = metav1.ConditionFalse
+	condition.Reason = hyperv1.AutoNodeNotConfiguredReason
+	condition.Message = "AutoNode provisioner is not configured"
+	return condition
 }

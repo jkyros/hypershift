@@ -400,10 +400,12 @@ type HostedControlPlaneStatus struct {
 	Platform *PlatformStatus `json:"platform,omitempty"`
 
 	// nodeCount tracks the number of nodes in the HostedControlPlane.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	NodeCount *int `json:"nodeCount,omitempty"`
 
 	// autoNode contains the observed state of the AutoNode (Karpenter) provisioner.
+	// +openshift:enable:FeatureGate=AutoNodeKarpenter
 	// +optional
 	AutoNode *AutoNodeStatus `json:"autoNode,omitempty"`
 
@@ -416,11 +418,13 @@ type HostedControlPlaneStatus struct {
 type AutoNodeStatus struct {
 	// nodeCount is the number of nodes fully provisioned by Karpenter.
 	// These are node objects that exist in the cluster and carry the karpenter.sh/nodepool label.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	NodeCount *int `json:"nodeCount,omitempty"`
 
 	// nodeClaimCount is the total number of NodeClaims managed by Karpenter.
 	// This represents what Karpenter intends to provision, whether or not the node object exists yet.
+	// +kubebuilder:validation:Minimum=0
 	// +optional
 	NodeClaimCount *int `json:"nodeClaimCount,omitempty"`
 }
