@@ -61,6 +61,11 @@ func TestKarpenter(t *testing.T) {
 		subnetClusterOpts.ControlPlaneAvailabilityPolicy = string(hyperv1.SingleReplica)
 		subnetClusterOpts.NodePoolReplicas = -1
 		subnetClusterOpts.AWSPlatform.EndpointAccess = string(hyperv1.PublicAndPrivate)
+		// PublicOnly=false ensures private subnets with NAT gateways are created. A node
+		// launched in a private subnet can only reach the control plane via the private link
+		// VPC endpoint — the path this test is validating. On a public-only cluster there are
+		// no private subnets and any launched node would bypass the private link entirely.
+		subnetClusterOpts.AWSPlatform.PublicOnly = false
 
 		e2eutil.NewHypershiftTest(t, ctx, func(t *testing.T, g Gomega, mgtClient crclient.Client, hostedCluster *hyperv1.HostedCluster) {
 			t.Logf("Testing Karpenter subnet aggregation for PublicAndPrivate cluster")
@@ -75,9 +80,13 @@ func TestKarpenter(t *testing.T) {
 				// With NodePoolReplicas=-1 there are no NodePools, so guest cluster operators
 				// (dns, ingress, monitoring, etc.) sit pending until Karpenter provisions a node.
 				// We create a NodePool referencing the default OpenshiftEC2NodeClass to unblock
-				// them. The default nodeclass has Spec.SubnetSelectorTerms==nil, so the karpenter
-				// operator controller excludes it from the karpenter-subnets ConfigMap — it cannot
-				// pollute the custom-subnet assertions in Phase 2.
+				// them. With publicOnly=false the default nodeclass uses the karpenter.sh/discovery
+				// tag selector, which only matches private subnets. Phase 1 nodes run in private
+				// subnets and reach the control plane via the private link VPC endpoint -- the same
+				// path used in production PublicAndPrivate clusters. The default nodeclass subnets
+				// will appear in the karpenter-subnets ConfigMap; Phase 2 uses ContainElement (not
+				// ConsistOf) so additional subnets from the default nodeclass do not break the
+				// assertion.
 				guestClient := e2eutil.WaitForGuestClient(t, ctx, mgtClient, hostedCluster)
 
 				karpenterNodePool := &unstructured.Unstructured{}
@@ -142,29 +151,44 @@ func TestKarpenter(t *testing.T) {
 				g.Expect(err).NotTo(HaveOccurred(), "AWSEndpointService should have a populated EndpointServiceName")
 				t.Logf("Found endpoint service: %s", endpointServiceName)
 
-				// Step 2: Pick an arbitrary subnet from the VPC.
+				// Step 2: Pick an arbitrary private worker subnet from the VPC.
 				// The default nodeclass uses a tag-based selector (not SubnetSelectorTerms), so its
 				// subnets are excluded from the ConfigMap by the controller. The ConfigMap will
 				// contain only the subnet we specify below, making ConsistOf a tight assertion.
+				//
+				// We filter to private worker subnets tagged for Karpenter discovery
+				// (kubernetes.io/role/internal-elb=1). These subnets have a 0.0.0.0/0 -> NAT gateway
+				// route, so a node launched in one can only reach the control plane via the private
+				// link VPC endpoint -- the path this test is validating end-to-end.
 				ec2client := ec2Client(subnetClusterOpts.AWSPlatform.Credentials.AWSCredentialsFile, subnetClusterOpts.AWSPlatform.Region)
 				vpcID := hostedCluster.Spec.Platform.AWS.CloudProviderConfig.VPC
-				t.Logf("Finding a subnet in VPC: %s", vpcID)
+				infraID := hostedCluster.Spec.InfraID
+				t.Logf("Finding a private worker subnet in VPC: %s (infraID: %s)", vpcID, infraID)
 
 				subnetsOutput, err := ec2client.DescribeSubnetsWithContext(ctx, &ec2.DescribeSubnetsInput{
 					Filters: []*ec2.Filter{
 						{Name: aws.String("vpc-id"), Values: []*string{aws.String(vpcID)}},
-						{Name: aws.String("state"), Values: []*string{aws.String("available")}},
+						{Name: aws.String("tag:karpenter.sh/discovery"), Values: []*string{aws.String(infraID)}},
+						{Name: aws.String("tag:kubernetes.io/role/internal-elb"), Values: []*string{aws.String("1")}},
 					},
 				})
 				g.Expect(err).NotTo(HaveOccurred(), "failed to describe subnets")
-				g.Expect(subnetsOutput.Subnets).NotTo(BeEmpty(), "VPC should have at least one subnet")
+				g.Expect(subnetsOutput.Subnets).NotTo(BeEmpty(), "cluster VPC should have at least one private worker subnet tagged for Karpenter discovery")
 
 				arbitrarySubnet := subnetsOutput.Subnets[0]
 				arbitrarySubnetID := aws.StringValue(arbitrarySubnet.SubnetId)
 				t.Logf("Using subnet: %s in AZ: %s", arbitrarySubnetID, aws.StringValue(arbitrarySubnet.AvailabilityZone))
 
 				// Step 3: Create OpenshiftEC2NodeClass with custom SubnetSelectorTerms.
+				// Read AssociatePublicIPAddress from the default nodeclass so the custom nodeclass
+				// inherits the correct network configuration for this cluster topology. On public
+				// clusters the default nodeclass has AssociatePublicIPAddress=true (set by the
+				// karpenter controller); without copying it the custom nodeclass would launch
+				// instances with no public IP and they would fail to register.
 				customNodeClassName := "custom-subnet-nodeclass"
+				defaultNodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+				g.Expect(guestClient.Get(ctx, crclient.ObjectKey{Name: "default"}, defaultNodeClass)).To(Succeed())
+
 				openshiftEC2NodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
 					ObjectMeta: metav1.ObjectMeta{
 						Name: customNodeClassName,
@@ -173,6 +197,7 @@ func TestKarpenter(t *testing.T) {
 						SubnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
 							{ID: arbitrarySubnetID},
 						},
+						AssociatePublicIPAddress: defaultNodeClass.Spec.AssociatePublicIPAddress,
 					},
 				}
 				g.Expect(guestClient.Create(ctx, openshiftEC2NodeClass)).To(Succeed())
@@ -263,8 +288,8 @@ func TestKarpenter(t *testing.T) {
 				var subnetIDs []string
 				err = json.Unmarshal([]byte(subnetIDsJSON), &subnetIDs)
 				g.Expect(err).NotTo(HaveOccurred(), "subnetIDs should be valid JSON")
-				g.Expect(subnetIDs).To(ConsistOf(arbitrarySubnetID),
-					"ConfigMap should contain exactly the user-specified subnet, not default NodeClass subnets")
+				g.Expect(subnetIDs).To(ContainElement(arbitrarySubnetID),
+					"ConfigMap should contain the user-specified subnet (proving the pipeline processed it)")
 				t.Logf("ConfigMap contains Karpenter-resolved subnet: %v", subnetIDs)
 
 				// Step 7: Verify the subnet flows through to AWSEndpointService.Spec.SubnetIDs.
