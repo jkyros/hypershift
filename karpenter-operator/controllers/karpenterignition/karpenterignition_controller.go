@@ -144,6 +144,10 @@ func (r *KarpenterIgnitionReconciler) Reconcile(ctx context.Context, req ctrl.Re
 		skewErr = detectVersionSkew(hostedCluster, version)
 	}
 
+	if err := r.reconcileKubeletConfigMap(ctx, hcp, openshiftEC2NodeClass); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile kubelet config configmap: %w", err)
+	}
+
 	if err := r.reconcileNodeClassToken(ctx, hcp, hostedCluster, openshiftEC2NodeClass, releaseImage); err != nil {
 		log.Error(err, "failed to reconcile token for OpenshiftEC2NodeClass", "name", openshiftEC2NodeClass.Name)
 		// Still update version status so conditions are set even when token reconciliation fails.
@@ -224,6 +228,15 @@ func (r *KarpenterIgnitionReconciler) createInMemoryNodePool(
 	openshiftEC2NodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass,
 	releaseImage string,
 ) *hyperv1.NodePool {
+	configRefs := []corev1.LocalObjectReference{
+		{Name: karpenterutil.KarpenterTaintConfigMapName},
+	}
+	if openshiftEC2NodeClass.Spec.Kubelet != nil {
+		configRefs = append(configRefs, corev1.LocalObjectReference{
+			Name: karpenterutil.KarpenterNodeClassKubeletConfigName(openshiftEC2NodeClass.Name),
+		})
+	}
+
 	return &hyperv1.NodePool{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:        karpenterutil.KarpenterNodePoolName(openshiftEC2NodeClass),
@@ -240,12 +253,8 @@ func (r *KarpenterIgnitionReconciler) createInMemoryNodePool(
 			Release: hyperv1.Release{
 				Image: releaseImage,
 			},
-			Config: []corev1.LocalObjectReference{
-				{
-					Name: karpenterutil.KarpenterTaintConfigMapName,
-				},
-			},
-			Arch: hyperv1.ArchitectureAMD64, // used to find default AMI
+			Config: configRefs,
+			Arch:   hyperv1.ArchitectureAMD64, // used to find default AMI
 		},
 	}
 }
@@ -385,6 +394,46 @@ func detectVersionSkew(hostedCluster *hyperv1.HostedCluster, version string) err
 	}
 
 	return supportedversion.ValidateVersionSkew(&hostedClusterVersion, &nodeClassVersion)
+}
+
+// reconcileKubeletConfigMap creates, updates, or deletes the per-OpenshiftEC2NodeClass KubeletConfig ConfigMap
+// in the HCP namespace based on whether the nodeclass has KubeletConfig set.
+func (r *KarpenterIgnitionReconciler) reconcileKubeletConfigMap(
+	ctx context.Context,
+	hcp *hyperv1.HostedControlPlane,
+	openshiftEC2NodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass,
+) error {
+	configMapName := karpenterutil.KarpenterNodeClassKubeletConfigName(openshiftEC2NodeClass.Name)
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      configMapName,
+			Namespace: hcp.Namespace,
+		},
+	}
+
+	if openshiftEC2NodeClass.Spec.Kubelet == nil {
+		if err := r.ManagementClient.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete kubelet config configmap %s: %w", configMapName, err)
+		}
+		return nil
+	}
+
+	manifest, err := openshiftEC2NodeClass.Spec.Kubelet.ToKubeletConfigManifest(configMapName)
+	if err != nil {
+		return fmt.Errorf("failed to generate kubelet config manifest: %w", err)
+	}
+
+	_, err = r.CreateOrUpdate(ctx, r.ManagementClient, cm, func() error {
+		if cm.Labels == nil {
+			cm.Labels = map[string]string{}
+		}
+		cm.Labels[karpenterutil.KarpenterNodeClassKubeletConfigLabel] = "true"
+		cm.Data = map[string]string{
+			"config": manifest,
+		}
+		return nil
+	})
+	return err
 }
 
 // buildConfigGenerator creates a ConfigGenerator for the in-memory NodePool
