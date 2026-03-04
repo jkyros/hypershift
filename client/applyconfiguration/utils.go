@@ -369,6 +369,8 @@ func ForKind(kind schema.GroupVersionKind) interface{} {
 		return &applyconfigurationkarpenterv1beta1.BlockDeviceApplyConfiguration{}
 	case karpenterv1beta1.SchemeGroupVersion.WithKind("BlockDeviceMapping"):
 		return &applyconfigurationkarpenterv1beta1.BlockDeviceMappingApplyConfiguration{}
+	case karpenterv1beta1.SchemeGroupVersion.WithKind("KubeletConfig"):
+		return &applyconfigurationkarpenterv1beta1.KubeletConfigApplyConfiguration{}
 	case karpenterv1beta1.SchemeGroupVersion.WithKind("OpenshiftEC2NodeClass"):
 		return &applyconfigurationkarpenterv1beta1.OpenshiftEC2NodeClassApplyConfiguration{}
 	case karpenterv1beta1.SchemeGroupVersion.WithKind("OpenshiftEC2NodeClassSpec"):
