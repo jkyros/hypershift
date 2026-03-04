@@ -5008,7 +5008,10 @@ created in the guest VPC</p>
 has been created for the specified NLB in the management VPC</p>
 </td>
 </tr><tr><td><p>&#34;AutoNodeEnabled&#34;</p></td>
-<td><p>AutoNodeEnabled indicates that AutoNode (Karpenter) is configured for this HostedCluster.</p>
+<td><p>AutoNodeEnabled indicates whether AutoNode (Karpenter) is configured and operational for this HostedCluster.
+<strong>True</strong> means AutoNode (Karpenter) is configured in the HostedCluster spec and the Karpenter components are fully rolled out and ready.
+<strong>False / AutoNodeProgressing</strong> means AutoNode is being enabled or disabled — the operation is in progress.
+<strong>False / AutoNodeNotConfigured</strong> means AutoNode is not configured in the spec and all Karpenter components have been removed.</p>
 </td>
 </tr><tr><td><p>&#34;CVOScaledDown&#34;</p></td>
 <td></td>

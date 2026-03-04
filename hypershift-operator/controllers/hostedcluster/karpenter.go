@@ -32,19 +32,16 @@ import (
 )
 
 func (r *HostedClusterReconciler) reconcileKarpenterOperator(cpContext controlplanecomponent.ControlPlaneContext, createOrUpdate upsert.CreateOrUpdateFN, hcluster *hyperv1.HostedCluster, hypershiftOperatorImage, controlPlaneOperatorImage string) error {
-	if !karpenterutil.IsKarpenterEnabled(hcluster.Spec.AutoNode) || hcluster.Status.KubeConfig == nil || hcluster.Status.IgnitionEndpoint == "" {
-		return nil
-	}
+	if karpenterutil.IsKarpenterEnabled(hcluster.Spec.AutoNode) && hcluster.Status.KubeConfig != nil && hcluster.Status.IgnitionEndpoint != "" {
+		// Generate configMap with KubeletConfig to register Nodes with karpenter expected taint.
+		configMap := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      karpenterutil.KarpenterTaintConfigMapName,
+				Namespace: cpContext.HCP.Namespace,
+			},
+		}
 
-	// Generate configMap with KubeletConfig to register Nodes with karpenter expected taint.
-	configMap := &corev1.ConfigMap{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      karpenterutil.KarpenterTaintConfigMapName,
-			Namespace: cpContext.HCP.Namespace,
-		},
-	}
-
-	kubeletConfig := fmt.Sprintf(`apiVersion: machineconfiguration.openshift.io/v1
+		kubeletConfig := fmt.Sprintf(`apiVersion: machineconfiguration.openshift.io/v1
 kind: KubeletConfig
 metadata:
   name: %s
@@ -55,28 +52,41 @@ spec:
         value: "true"
         effect: "NoExecute"`, karpenterutil.KarpenterTaintConfigMapName)
 
-	_, err := createOrUpdate(cpContext, r.Client, configMap, func() error {
-		configMap.Data = map[string]string{
-			"config": kubeletConfig,
+		_, err := createOrUpdate(cpContext, r.Client, configMap, func() error {
+			configMap.Data = map[string]string{
+				"config": kubeletConfig,
+			}
+			return nil
+		})
+		if err != nil {
+			return fmt.Errorf("failed to create configmap: %w", err)
 		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create configmap: %w", err)
 	}
 
-	// TODO(alberto): Ensure deletion if autoNode is disabled.
+	// When Karpenter is disabled, clear any stale AutoNode status from the HCP.
+	// The karpenter-operator only runs when enabled, so it cannot clear this itself.
+	if !karpenterutil.IsKarpenterEnabled(hcluster.Spec.AutoNode) && cpContext.HCP.Status.AutoNode != nil {
+		patch := client.MergeFrom(cpContext.HCP.DeepCopy())
+		cpContext.HCP.Status.AutoNode = nil
+		if err := cpContext.Client.Status().Patch(cpContext, cpContext.HCP, patch); err != nil {
+			return fmt.Errorf("failed to clear AutoNode status: %w", err)
+		}
+	}
 
-	// Run karpenter Operator to manage CRs management and guest side.
-
+	// Always reconcile the karpenter-operator component — its predicate handles enable/disable and
+	// triggers deletion of the ControlPlaneComponent CR and associated resources when Karpenter is disabled.
 	karpenteroperator := karpenteroperatorv2.NewComponent(&karpenteroperatorv2.KarpenterOperatorOptions{
 		HyperShiftOperatorImage:   hypershiftOperatorImage,
 		ControlPlaneOperatorImage: controlPlaneOperatorImage,
 		IgnitionEndpoint:          hcluster.Status.IgnitionEndpoint,
 	})
-
 	if err := karpenteroperator.Reconcile(cpContext); err != nil {
-		return fmt.Errorf("failed to reconcile controlplane operator component: %w", err)
+		return fmt.Errorf("failed to reconcile karpenter-operator component: %w", err)
+	}
+
+	// Always reconcile the karpenter component — its predicate handles enable/disable.
+	if err := karpenterv2.NewComponent().Reconcile(cpContext); err != nil {
+		return fmt.Errorf("failed to reconcile karpenter component: %w", err)
 	}
 
 	return nil
