@@ -25,6 +25,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apiextensionsv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -106,7 +107,10 @@ func (r *EC2NodeClassReconciler) SetupWithManager(ctx context.Context, mgr ctrl.
 		// Watch HostedControlPlane for annotation changes
 		WatchesRawSource(source.Kind[client.Object](managementCluster.GetCache(), &hyperv1.HostedControlPlane{},
 			handler.EnqueueRequestsFromMapFunc(r.mapToOpenShiftEC2NodeClasses),
-			r.hcpAnnotationPredicate()))
+			r.hcpAnnotationPredicate())).
+		// Watch AWSEndpointService in management cluster to update private-link condition on status changes
+		WatchesRawSource(source.Kind[client.Object](managementCluster.GetCache(), &hyperv1.AWSEndpointService{},
+			handler.EnqueueRequestsFromMapFunc(r.mapToOpenShiftEC2NodeClasses)))
 	return bldr.Complete(r)
 }
 
@@ -204,6 +208,10 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if err := r.reconcileKarpenterSubnetsConfigMap(ctx, hcp); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile karpenter subnets configmap: %w", err)
+	}
+
+	if err := r.reconcilePrivateLinkCondition(ctx, openshiftEC2NodeClass); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile private link condition: %w", err)
 	}
 
 	if err := r.reconcileVAP(ctx); err != nil {
@@ -476,6 +484,62 @@ func (r *EC2NodeClassReconciler) reconcileKarpenterSubnetsConfigMap(ctx context.
 	}
 
 	log.Info("Reconciled karpenter subnets configmap", "subnetCount", len(subnetIDs))
+	return nil
+}
+
+// reconcilePrivateLinkCondition sets the AWSPrivateLinkSubnetsAccepted condition on the
+// OpenshiftEC2NodeClass based on the status of AWSEndpointService resources in the management cluster.
+func (r *EC2NodeClassReconciler) reconcilePrivateLinkCondition(ctx context.Context, openshiftEC2NodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass) error {
+	// Default NodeClass uses discovery-tag subnets, not managed by the private-link pipeline.
+	if openshiftEC2NodeClass.Spec.SubnetSelectorTerms == nil {
+		return r.setPrivateLinkCondition(ctx, openshiftEC2NodeClass, metav1.ConditionUnknown, "NotApplicable",
+			"default NodeClass uses discovery-tag subnets not managed by the private-link pipeline")
+	}
+
+	endpointServiceList := &hyperv1.AWSEndpointServiceList{}
+	if err := r.managementClient.List(ctx, endpointServiceList, client.InNamespace(r.Namespace)); err != nil {
+		return fmt.Errorf("failed to list AWSEndpointService: %w", err)
+	}
+
+	if len(endpointServiceList.Items) == 0 {
+		return r.setPrivateLinkCondition(ctx, openshiftEC2NodeClass, metav1.ConditionUnknown, "Pending",
+			"no AWSEndpointService resources found in the management cluster")
+	}
+
+	for i := range endpointServiceList.Items {
+		eps := &endpointServiceList.Items[i]
+		cond := meta.FindStatusCondition(eps.Status.Conditions, string(hyperv1.AWSEndpointServiceAvailable))
+		if cond == nil || cond.Status != metav1.ConditionTrue {
+			msg := "AWSEndpointService is not yet available"
+			if cond != nil {
+				msg = cond.Message
+			}
+			return r.setPrivateLinkCondition(ctx, openshiftEC2NodeClass, metav1.ConditionFalse, "EndpointServiceNotAvailable", msg)
+		}
+	}
+
+	return r.setPrivateLinkCondition(ctx, openshiftEC2NodeClass, metav1.ConditionTrue, "EndpointServiceAvailable",
+		"all AWSEndpointService resources are available")
+}
+
+func (r *EC2NodeClassReconciler) setPrivateLinkCondition(ctx context.Context, openshiftEC2NodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass, status metav1.ConditionStatus, reason, message string) error {
+	originalObj := openshiftEC2NodeClass.DeepCopy()
+
+	meta.SetStatusCondition(&openshiftEC2NodeClass.Status.Conditions, metav1.Condition{
+		Type:               hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+		Status:             status,
+		Reason:             reason,
+		Message:            message,
+		ObservedGeneration: openshiftEC2NodeClass.Generation,
+	})
+
+	if reflect.DeepEqual(originalObj.Status.Conditions, openshiftEC2NodeClass.Status.Conditions) {
+		return nil
+	}
+
+	if err := r.guestClient.Status().Patch(ctx, openshiftEC2NodeClass, client.MergeFrom(originalObj)); err != nil {
+		return fmt.Errorf("failed to patch AWSPrivateLinkSubnetsAccepted condition: %w", err)
+	}
 	return nil
 }
 

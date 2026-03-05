@@ -6,6 +6,11 @@ import (
 )
 
 const (
+	// ConditionTypeAWSPrivateLinkSubnetsAccepted indicates whether the subnets resolved
+	// by this NodeClass have been accepted by the AWSEndpointService private-link
+	// controller in the management cluster.
+	ConditionTypeAWSPrivateLinkSubnetsAccepted = "AWSPrivateLinkSubnetsAccepted"
+
 	// KarpenterCoreE2EOverrideAnnotation is an annotation to be applied to a HostedCluster that allows
 	// overriding the default behavior of the Karpenter Operator for upstream Karpenter core E2E testing purposes.
 	KarpenterCoreE2EOverrideAnnotation = "hypershift.openshift.io/karpenter-core-e2e-override"

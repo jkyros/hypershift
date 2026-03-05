@@ -19,6 +19,7 @@ import (
 	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -738,6 +739,238 @@ func TestKarpenterSecretPredicate(t *testing.T) {
 	}
 }
 
+func TestReconcilePrivateLinkCondition(t *testing.T) {
+	const testNamespace = "clusters-my-cluster"
+
+	testCases := []struct {
+		name                    string
+		subnetSelectorTerms     []hyperkarpenterv1.SubnetSelectorTerm
+		managementObjects       []client.Object
+		expectedConditionStatus metav1.ConditionStatus
+		expectedReason          string
+	}{
+		{
+			name:                    "When SubnetSelectorTerms is nil it should set condition Unknown with NotApplicable reason",
+			subnetSelectorTerms:     nil,
+			managementObjects:       []client.Object{},
+			expectedConditionStatus: metav1.ConditionUnknown,
+			expectedReason:          "NotApplicable",
+		},
+		{
+			name: "When no AWSEndpointService resources exist it should set condition Unknown with Pending reason",
+			subnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
+				{ID: "subnet-aaa"},
+			},
+			managementObjects:       []client.Object{},
+			expectedConditionStatus: metav1.ConditionUnknown,
+			expectedReason:          "Pending",
+		},
+		{
+			name: "When AWSEndpointService has AWSEndpointServiceAvailable=True it should set condition True",
+			subnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
+				{ID: "subnet-aaa"},
+			},
+			managementObjects: []client.Object{
+				&hyperv1.AWSEndpointService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.AWSEndpointServiceStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(hyperv1.AWSEndpointServiceAvailable),
+								Status: metav1.ConditionTrue,
+								Reason: "AWSSuccess",
+							},
+						},
+					},
+				},
+			},
+			expectedConditionStatus: metav1.ConditionTrue,
+			expectedReason:          "EndpointServiceAvailable",
+		},
+		{
+			name: "When AWSEndpointService has AWSEndpointServiceAvailable=False it should set condition False with forwarded message",
+			subnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
+				{ID: "subnet-aaa"},
+			},
+			managementObjects: []client.Object{
+				&hyperv1.AWSEndpointService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.AWSEndpointServiceStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:    string(hyperv1.AWSEndpointServiceAvailable),
+								Status:  metav1.ConditionFalse,
+								Reason:  "AWSError",
+								Message: "subnet-aaa is in an unsupported availability zone",
+							},
+						},
+					},
+				},
+			},
+			expectedConditionStatus: metav1.ConditionFalse,
+			expectedReason:          "EndpointServiceNotAvailable",
+		},
+		{
+			name: "When AWSEndpointService has no AWSEndpointServiceAvailable condition it should set condition False",
+			subnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
+				{ID: "subnet-aaa"},
+			},
+			managementObjects: []client.Object{
+				&hyperv1.AWSEndpointService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.AWSEndpointServiceStatus{},
+				},
+			},
+			expectedConditionStatus: metav1.ConditionFalse,
+			expectedReason:          "EndpointServiceNotAvailable",
+		},
+		{
+			name: "When all AWSEndpointService resources are available it should set condition True",
+			subnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
+				{ID: "subnet-aaa"},
+			},
+			managementObjects: []client.Object{
+				&hyperv1.AWSEndpointService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.AWSEndpointServiceStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(hyperv1.AWSEndpointServiceAvailable),
+								Status: metav1.ConditionTrue,
+								Reason: "AWSSuccess",
+							},
+						},
+					},
+				},
+				&hyperv1.AWSEndpointService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ignition",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.AWSEndpointServiceStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(hyperv1.AWSEndpointServiceAvailable),
+								Status: metav1.ConditionTrue,
+								Reason: "AWSSuccess",
+							},
+						},
+					},
+				},
+			},
+			expectedConditionStatus: metav1.ConditionTrue,
+			expectedReason:          "EndpointServiceAvailable",
+		},
+		{
+			name: "When one AWSEndpointService is not available it should set condition False",
+			subnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
+				{ID: "subnet-aaa"},
+			},
+			managementObjects: []client.Object{
+				&hyperv1.AWSEndpointService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.AWSEndpointServiceStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(hyperv1.AWSEndpointServiceAvailable),
+								Status: metav1.ConditionTrue,
+								Reason: "AWSSuccess",
+							},
+						},
+					},
+				},
+				&hyperv1.AWSEndpointService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "ignition",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.AWSEndpointServiceStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:    string(hyperv1.AWSEndpointServiceAvailable),
+								Status:  metav1.ConditionFalse,
+								Reason:  "AWSError",
+								Message: "NLB not ready in requested AZ",
+							},
+						},
+					},
+				},
+			},
+			expectedConditionStatus: metav1.ConditionFalse,
+			expectedReason:          "EndpointServiceNotAvailable",
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			openshiftEC2NodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-nodeclass",
+				},
+				Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+					SubnetSelectorTerms: tc.subnetSelectorTerms,
+				},
+			}
+
+			managementClient := fake.NewClientBuilder().
+				WithScheme(hyperapi.Scheme).
+				WithObjects(tc.managementObjects...).
+				WithStatusSubresource(tc.managementObjects...).
+				Build()
+
+			// Patch status on management objects since WithObjects doesn't set status
+			for _, obj := range tc.managementObjects {
+				if eps, ok := obj.(*hyperv1.AWSEndpointService); ok {
+					if err := managementClient.Status().Update(context.Background(), eps); err != nil {
+						t.Fatalf("failed to set status on AWSEndpointService: %v", err)
+					}
+				}
+			}
+
+			guestClient := fake.NewClientBuilder().
+				WithScheme(hyperapi.Scheme).
+				WithObjects(openshiftEC2NodeClass).
+				WithStatusSubresource(openshiftEC2NodeClass).
+				Build()
+
+			r := &EC2NodeClassReconciler{
+				Namespace:        testNamespace,
+				managementClient: managementClient,
+				guestClient:      guestClient,
+			}
+
+			err := r.reconcilePrivateLinkCondition(context.Background(), openshiftEC2NodeClass)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Fetch the updated object to verify status was patched
+			updated := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+			g.Expect(guestClient.Get(context.Background(), client.ObjectKey{Name: "test-nodeclass"}, updated)).To(Succeed())
+
+			cond := meta.FindStatusCondition(updated.Status.Conditions, hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted)
+			g.Expect(cond).NotTo(BeNil(), "expected AWSPrivateLinkSubnetsAccepted condition to be set")
+			g.Expect(cond.Status).To(Equal(tc.expectedConditionStatus))
+			g.Expect(cond.Reason).To(Equal(tc.expectedReason))
+		})
+	}
+}
+
 func TestReconcileKarpenterSubnetsConfigMap(t *testing.T) {
 	const testNamespace = "clusters-my-cluster"
 
@@ -760,8 +993,8 @@ func TestReconcileKarpenterSubnetsConfigMap(t *testing.T) {
 		expectedSubnets     []string
 	}{
 		{
-			name:            "When there are no OpenshiftEC2NodeClass resources it should delete the ConfigMap",
-			guestObjects:    []client.Object{},
+			name:         "When there are no OpenshiftEC2NodeClass resources it should delete the ConfigMap",
+			guestObjects: []client.Object{},
 			managementObjects: []client.Object{
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
