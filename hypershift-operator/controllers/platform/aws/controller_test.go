@@ -590,30 +590,15 @@ func (q *captureQueue) Add(item reconcile.Request) {
 }
 
 func TestEnqueueOnKarpenterConfigMapChange(t *testing.T) {
+	// Note: label+name filtering is handled by the predicate in SetupWithManager.
+	// This test exercises only the handler's data-diff logic, which runs after
+	// the predicate has already admitted the event.
 	testCases := []struct {
 		name           string
 		oldCM          *corev1.ConfigMap
 		newCM          *corev1.ConfigMap
 		expectedQueued int
 	}{
-		{
-			name: "When a non-karpenter ConfigMap is updated it should not enqueue",
-			oldCM: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "some-other-configmap",
-					Namespace: "clusters-my-cluster",
-				},
-				Data: map[string]string{"subnetIDs": `["subnet-a"]`},
-			},
-			newCM: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "some-other-configmap",
-					Namespace: "clusters-my-cluster",
-				},
-				Data: map[string]string{"subnetIDs": `["subnet-a","subnet-b"]`},
-			},
-			expectedQueued: 0,
-		},
 		{
 			name: "When karpenter ConfigMap subnet data changes it should enqueue AWSEndpointServices",
 			oldCM: &corev1.ConfigMap{
@@ -658,24 +643,6 @@ func TestEnqueueOnKarpenterConfigMapChange(t *testing.T) {
 					Labels: map[string]string{
 						"hypershift.openshift.io/managed-by": "karpenter",
 					},
-				},
-				Data: map[string]string{"subnetIDs": `["subnet-a","subnet-b"]`},
-			},
-			expectedQueued: 0,
-		},
-		{
-			name: "When a ConfigMap named karpenter-subnets lacks the managed-by label it should not enqueue",
-			oldCM: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      karpenterutil.KarpenterSubnetsConfigMapName,
-					Namespace: "clusters-my-cluster",
-				},
-				Data: map[string]string{"subnetIDs": `["subnet-a"]`},
-			},
-			newCM: &corev1.ConfigMap{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      karpenterutil.KarpenterSubnetsConfigMapName,
-					Namespace: "clusters-my-cluster",
 				},
 				Data: map[string]string{"subnetIDs": `["subnet-a","subnet-b"]`},
 			},

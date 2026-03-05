@@ -173,7 +173,7 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 		return ctrl.Result{}, nil
 	}
 
-	if !controllerutil.ContainsFinalizer(hcp, finalizer) {
+	if !controllerutil.ContainsFinalizer(openshiftEC2NodeClass, finalizer) {
 		original := openshiftEC2NodeClass.DeepCopy()
 		controllerutil.AddFinalizer(openshiftEC2NodeClass, finalizer)
 		if err := r.guestClient.Patch(ctx, openshiftEC2NodeClass, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})); err != nil {
@@ -430,7 +430,11 @@ func (r *EC2NodeClassReconciler) reconcileKarpenterSubnetsConfigMap(ctx context.
 		if err != nil && !apierrors.IsNotFound(err) {
 			return fmt.Errorf("failed to delete karpenter subnets configmap: %w", err)
 		}
-		log.Info("Deleted karpenter subnets configmap (no user-defined OpenshiftEC2NodeClass resources with resolved subnets)")
+		if apierrors.IsNotFound(err) {
+			log.Info("Karpenter subnets configmap did not exist, nothing to delete")
+		} else {
+			log.Info("Deleted karpenter subnets configmap (no user-defined OpenshiftEC2NodeClass resources with resolved subnets)")
+		}
 		return nil
 	}
 
