@@ -63,7 +63,8 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 				SubnetSelectorTerms: []awskarpenterv1.SubnetSelectorTerm{
 					{
 						Tags: map[string]string{
-							"karpenter.sh/discovery": testInfraID,
+							"karpenter.sh/discovery":          testInfraID,
+							"kubernetes.io/role/internal-elb": "1",
 						},
 					},
 				},
@@ -172,7 +173,8 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 				SubnetSelectorTerms: []awskarpenterv1.SubnetSelectorTerm{
 					{
 						Tags: map[string]string{
-							"karpenter.sh/discovery": testInfraID,
+							"karpenter.sh/discovery":          testInfraID,
+							"kubernetes.io/role/internal-elb": "1",
 						},
 					},
 				},
@@ -213,7 +215,8 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 				SubnetSelectorTerms: []awskarpenterv1.SubnetSelectorTerm{
 					{
 						Tags: map[string]string{
-							"karpenter.sh/discovery": testInfraID,
+							"karpenter.sh/discovery":          testInfraID,
+							"kubernetes.io/role/internal-elb": "1",
 						},
 					},
 				},
@@ -243,7 +246,8 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 				SubnetSelectorTerms: []awskarpenterv1.SubnetSelectorTerm{
 					{
 						Tags: map[string]string{
-							"karpenter.sh/discovery": testInfraID,
+							"karpenter.sh/discovery":          testInfraID,
+							"kubernetes.io/role/internal-elb": "1",
 						},
 					},
 				},
@@ -292,7 +296,8 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 				SubnetSelectorTerms: []awskarpenterv1.SubnetSelectorTerm{
 					{
 						Tags: map[string]string{
-							"karpenter.sh/discovery": "test-infra",
+							"karpenter.sh/discovery":          "test-infra",
+							"kubernetes.io/role/internal-elb": "1",
 						},
 					},
 				},
@@ -346,7 +351,8 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 				SubnetSelectorTerms: []awskarpenterv1.SubnetSelectorTerm{
 					{
 						Tags: map[string]string{
-							"karpenter.sh/discovery": "test-infra",
+							"karpenter.sh/discovery":          "test-infra",
+							"kubernetes.io/role/internal-elb": "1",
 						},
 					},
 				},
@@ -361,6 +367,46 @@ func TestReconcileEC2NodeClass(t *testing.T) {
 					"red-hat-clustertype": "rosa",            // Platform tag won over nodeclass tag
 					"red-hat-managed":     "true",            // Platform tag added
 					"nodeclass-only-tag":  "nodeclass-value", // Nodeclass tag preserved
+				},
+				BlockDeviceMappings: []*awskarpenterv1.BlockDeviceMapping{
+					{
+						DeviceName: ptr.To("/dev/xvda"),
+						EBS: &awskarpenterv1.BlockDevice{
+							VolumeSize: ptr.To(resource.MustParse("120Gi")),
+							VolumeType: ptr.To("gp3"),
+							Encrypted:  ptr.To(true),
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "When HCP has EndpointAccess=Public it should use bare discovery tag without internal-elb filter",
+			hcp: &hyperv1.HostedControlPlane{
+				Spec: hyperv1.HostedControlPlaneSpec{
+					InfraID: testInfraID,
+					Platform: hyperv1.PlatformSpec{
+						AWS: &hyperv1.AWSPlatformSpec{
+							EndpointAccess: hyperv1.Public,
+						},
+					},
+				},
+			},
+			spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{},
+			expectedSpec: awskarpenterv1.EC2NodeClassSpec{
+				SubnetSelectorTerms: []awskarpenterv1.SubnetSelectorTerm{
+					{
+						Tags: map[string]string{
+							"karpenter.sh/discovery": testInfraID,
+						},
+					},
+				},
+				SecurityGroupSelectorTerms: []awskarpenterv1.SecurityGroupSelectorTerm{
+					{
+						Tags: map[string]string{
+							"karpenter.sh/discovery": testInfraID,
+						},
+					},
 				},
 				BlockDeviceMappings: []*awskarpenterv1.BlockDeviceMapping{
 					{

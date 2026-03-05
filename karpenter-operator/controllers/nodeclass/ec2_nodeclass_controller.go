@@ -294,11 +294,27 @@ func reconcileEC2NodeClass(ctx context.Context, ec2NodeClass *awskarpenterv1.EC2
 				ID:   term.ID,
 			})
 		}
-	} else {
+	} else if hcp.Spec.Platform.AWS != nil && hcp.Spec.Platform.AWS.EndpointAccess == hyperv1.Public {
+		// Public-only clusters have no private subnets; use bare discovery tag so Karpenter
+		// can find subnets. Nodes in public subnets require AssociatePublicIPAddress=true.
 		subnetSelectorTerms = []awskarpenterv1.SubnetSelectorTerm{
 			{
 				Tags: map[string]string{
 					"karpenter.sh/discovery": hcp.Spec.InfraID,
+				},
+			},
+		}
+	} else {
+		// Private and PublicAndPrivate clusters: restrict discovery to private subnets only.
+		// Public subnets tagged with karpenter.sh/discovery would cause nodes to be placed
+		// in public subnets, requiring AssociatePublicIPAddress=true and exposing nodes to
+		// the internet. The kubernetes.io/role/internal-elb tag is required on private subnets
+		// by both HyperShift infra creation and ROSA BYOVPC preflight validation.
+		subnetSelectorTerms = []awskarpenterv1.SubnetSelectorTerm{
+			{
+				Tags: map[string]string{
+					"karpenter.sh/discovery":          hcp.Spec.InfraID,
+					"kubernetes.io/role/internal-elb": "1",
 				},
 			},
 		}
