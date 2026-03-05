@@ -84,7 +84,6 @@ func (f *fakeEC2Client) ModifyVpcEndpointServicePermissions(in *ec2.ModifyVpcEnd
 	return &ec2.ModifyVpcEndpointServicePermissionsOutput{}, nil
 }
 
-
 func TestReconcileAWSEndpointServiceStatus(t *testing.T) {
 	const mockControlPlaneOperatorRoleArn = "arn:aws:12345678910::iam:role/fakeRoleARN"
 
@@ -577,7 +576,6 @@ func TestListSubnetIDs(t *testing.T) {
 		})
 	}
 }
-
 
 // captureQueue is a simple workqueue that captures added items for test inspection.
 type captureQueue struct {

@@ -370,7 +370,6 @@ func reconcileAWSEndpointServiceSubnetIDs(ctx context.Context, c client.Client, 
 	return nil
 }
 
-
 func listNodePools(ctx context.Context, c client.Client, nodePoolNamespace string, clusterName string) ([]hyperv1.NodePool, error) {
 	nodePoolList := &hyperv1.NodePoolList{}
 	if err := c.List(ctx, nodePoolList, &client.ListOptions{Namespace: nodePoolNamespace}); err != nil {
@@ -412,7 +411,6 @@ func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNa
 
 	return subnetIDSet.List(), nil
 }
-
 
 func listKarpenterSubnetIDs(ctx context.Context, c client.Client, namespace string) ([]string, error) {
 	configMap := &corev1.ConfigMap{}
