@@ -874,6 +874,37 @@ func TestReconcilePrivateLinkCondition(t *testing.T) {
 			expectedReason:          "EndpointServiceAvailable",
 		},
 		{
+			name: "When AWSEndpointAvailable is False it should set condition False",
+			subnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
+				{ID: "subnet-aaa"},
+			},
+			managementObjects: []client.Object{
+				&hyperv1.AWSEndpointService{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "kube-apiserver",
+						Namespace: testNamespace,
+					},
+					Status: hyperv1.AWSEndpointServiceStatus{
+						Conditions: []metav1.Condition{
+							{
+								Type:   string(hyperv1.AWSEndpointServiceAvailable),
+								Status: metav1.ConditionTrue,
+								Reason: "AWSSuccess",
+							},
+							{
+								Type:    string(hyperv1.AWSEndpointAvailable),
+								Status:  metav1.ConditionFalse,
+								Reason:  "AWSError",
+								Message: "failed to modify vpc endpoint: DuplicateSubnetsInSameZone",
+							},
+						},
+					},
+				},
+			},
+			expectedConditionStatus: metav1.ConditionFalse,
+			expectedReason:          "EndpointNotAvailable",
+		},
+		{
 			name: "When one AWSEndpointService is not available it should set condition False",
 			subnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
 				{ID: "subnet-aaa"},

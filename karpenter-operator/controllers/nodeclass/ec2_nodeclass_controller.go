@@ -508,13 +508,19 @@ func (r *EC2NodeClassReconciler) reconcilePrivateLinkCondition(ctx context.Conte
 
 	for i := range endpointServiceList.Items {
 		eps := &endpointServiceList.Items[i]
-		cond := meta.FindStatusCondition(eps.Status.Conditions, string(hyperv1.AWSEndpointServiceAvailable))
-		if cond == nil || cond.Status != metav1.ConditionTrue {
+		svcCond := meta.FindStatusCondition(eps.Status.Conditions, string(hyperv1.AWSEndpointServiceAvailable))
+		if svcCond == nil || svcCond.Status != metav1.ConditionTrue {
 			msg := "AWSEndpointService is not yet available"
-			if cond != nil {
-				msg = cond.Message
+			if svcCond != nil {
+				msg = svcCond.Message
 			}
 			return r.setPrivateLinkCondition(ctx, openshiftEC2NodeClass, metav1.ConditionFalse, "EndpointServiceNotAvailable", msg)
+		}
+
+		// Also check the VPC endpoint modification condition — catches DuplicateSubnetsInSameZone etc.
+		epCond := meta.FindStatusCondition(eps.Status.Conditions, string(hyperv1.AWSEndpointAvailable))
+		if epCond != nil && epCond.Status == metav1.ConditionFalse {
+			return r.setPrivateLinkCondition(ctx, openshiftEC2NodeClass, metav1.ConditionFalse, "EndpointNotAvailable", epCond.Message)
 		}
 	}
 

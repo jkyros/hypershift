@@ -10,6 +10,7 @@ import (
 
 	certificatesv1alpha1 "github.com/openshift/hypershift/api/certificates/v1alpha1"
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
+	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
 
 	certificatesv1 "k8s.io/api/certificates/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -477,6 +478,8 @@ func Conditions(item client.Object) ([]Condition, error) {
 	case *certificatesv1alpha1.CertificateRevocationRequest:
 		return adaptConditions(obj.Status.Conditions), nil
 	case *hyperv1.ControlPlaneComponent:
+		return adaptConditions(obj.Status.Conditions), nil
+	case *hyperkarpenterv1.OpenshiftEC2NodeClass:
 		return adaptConditions(obj.Status.Conditions), nil
 	case *certificatesv1.CertificateSigningRequest:
 		conditions := make([]Condition, len(obj.Status.Conditions))

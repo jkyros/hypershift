@@ -179,6 +179,97 @@ func TestKarpenter(t *testing.T) {
 				arbitrarySubnetID := aws.StringValue(arbitrarySubnet.SubnetId)
 				t.Logf("Using subnet: %s in AZ: %s", arbitrarySubnetID, aws.StringValue(arbitrarySubnet.AvailabilityZone))
 
+				// Fetch the default nodeclass before Step 2a so we can copy AssociatePublicIPAddress
+				// into both the bad-subnet and good-subnet nodeclasses.
+				defaultNodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+				g.Expect(guestClient.Get(ctx, crclient.ObjectKey{Name: "default"}, defaultNodeClass)).To(Succeed())
+
+				// Step 2a: Bad-subnet phase — verify AWSPrivateLinkSubnetsAccepted=False propagates.
+				// Find a public subnet in the VPC (no kubernetes.io/role/internal-elb=1 tag).
+				// Karpenter can resolve it (it's a real subnet), but when the private-link controller
+				// calls ModifyVpcEndpoint to add it to the VPC endpoint, AWS rejects it because the NLB
+				// has nodes only in the private AZs — causing AWSEndpointServiceAvailable=False, which
+				// our controller mirrors as AWSPrivateLinkSubnetsAccepted=False.
+				t.Logf("Step 2a: Finding a public subnet to test bad-subnet condition propagation")
+				allSubnetsOutput, err := ec2client.DescribeSubnetsWithContext(ctx, &ec2.DescribeSubnetsInput{
+					Filters: []*ec2.Filter{
+						{Name: aws.String("vpc-id"), Values: []*string{aws.String(vpcID)}},
+					},
+				})
+				g.Expect(err).NotTo(HaveOccurred(), "failed to describe subnets for bad-subnet phase")
+
+				var badSubnetID string
+				for _, s := range allSubnetsOutput.Subnets {
+					isInternal := false
+					for _, tag := range s.Tags {
+						if aws.StringValue(tag.Key) == "kubernetes.io/role/internal-elb" {
+							isInternal = true
+							break
+						}
+					}
+					if !isInternal {
+						badSubnetID = aws.StringValue(s.SubnetId)
+						break
+					}
+				}
+
+				if badSubnetID == "" {
+					t.Logf("No public subnet found in VPC; skipping bad-subnet phase")
+				} else {
+					t.Logf("Using public subnet %s as bad subnet for False condition test", badSubnetID)
+					badNodeClassName := "bad-subnet-nodeclass"
+					badNodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+						ObjectMeta: metav1.ObjectMeta{Name: badNodeClassName},
+						Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+							SubnetSelectorTerms:      []hyperkarpenterv1.SubnetSelectorTerm{{ID: badSubnetID}},
+							AssociatePublicIPAddress: defaultNodeClass.Spec.AssociatePublicIPAddress,
+						},
+					}
+					g.Expect(guestClient.Create(ctx, badNodeClass)).To(Succeed())
+					defer func() { _ = guestClient.Delete(ctx, badNodeClass) }()
+
+					// Wait for Karpenter to resolve the bad subnet — confirms it's a real subnet
+					// and the pipeline will proceed to the private-link controller.
+					t.Logf("Waiting for Karpenter to resolve bad subnet in Status")
+					e2eutil.EventuallyObject(t, ctx,
+						fmt.Sprintf("OpenshiftEC2NodeClass %q to resolve bad subnet in Status", badNodeClassName),
+						func(ctx context.Context) (*hyperkarpenterv1.OpenshiftEC2NodeClass, error) {
+							nc := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+							err := guestClient.Get(ctx, crclient.ObjectKey{Name: badNodeClassName}, nc)
+							return nc, err
+						},
+						[]e2eutil.Predicate[*hyperkarpenterv1.OpenshiftEC2NodeClass]{
+							func(nc *hyperkarpenterv1.OpenshiftEC2NodeClass) (bool, string, error) {
+								if len(nc.Status.Subnets) == 0 {
+									return false, "Status.Subnets not yet populated", nil
+								}
+								return true, fmt.Sprintf("Status.Subnets populated: %v", nc.Status.Subnets), nil
+							},
+						},
+						e2eutil.WithTimeout(2*time.Minute),
+					)
+
+					// Wait for the private-link controller to reject the public subnet.
+					t.Logf("Waiting for AWSPrivateLinkSubnetsAccepted=False on bad NodeClass")
+					e2eutil.EventuallyObject(t, ctx,
+						fmt.Sprintf("OpenshiftEC2NodeClass %q to have AWSPrivateLinkSubnetsAccepted=False", badNodeClassName),
+						func(ctx context.Context) (*hyperkarpenterv1.OpenshiftEC2NodeClass, error) {
+							nc := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+							err := guestClient.Get(ctx, crclient.ObjectKey{Name: badNodeClassName}, nc)
+							return nc, err
+						},
+						[]e2eutil.Predicate[*hyperkarpenterv1.OpenshiftEC2NodeClass]{
+							e2eutil.ConditionPredicate[*hyperkarpenterv1.OpenshiftEC2NodeClass](e2eutil.Condition{
+								Type:   hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+								Status: metav1.ConditionFalse,
+							}),
+						},
+						e2eutil.WithTimeout(5*time.Minute),
+					)
+					t.Logf("Bad-subnet phase complete: AWSPrivateLinkSubnetsAccepted=False confirmed")
+					g.Expect(guestClient.Delete(ctx, badNodeClass)).To(Succeed())
+				}
+
 				// Step 3: Create OpenshiftEC2NodeClass with custom SubnetSelectorTerms.
 				// Read AssociatePublicIPAddress from the default nodeclass so the custom nodeclass
 				// inherits the correct network configuration for this cluster topology. On public
@@ -186,8 +277,6 @@ func TestKarpenter(t *testing.T) {
 				// karpenter controller); without copying it the custom nodeclass would launch
 				// instances with no public IP and they would fail to register.
 				customNodeClassName := "custom-subnet-nodeclass"
-				defaultNodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
-				g.Expect(guestClient.Get(ctx, crclient.ObjectKey{Name: "default"}, defaultNodeClass)).To(Succeed())
 
 				openshiftEC2NodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
 					ObjectMeta: metav1.ObjectMeta{
@@ -263,6 +352,25 @@ func TestKarpenter(t *testing.T) {
 				g.Expect(resolvedSubnets).To(HaveLen(1), "should have resolved exactly one subnet")
 				g.Expect(resolvedSubnets[0].ID).To(Equal(arbitrarySubnetID), "resolved subnet should match the specified subnet")
 				t.Logf("Karpenter resolved subnet: %s", resolvedSubnets[0].ID)
+
+				// Also verify the private-link condition is True for the good subnet.
+				t.Logf("Waiting for AWSPrivateLinkSubnetsAccepted=True on good NodeClass")
+				e2eutil.EventuallyObject(t, ctx,
+					fmt.Sprintf("OpenshiftEC2NodeClass %q to have AWSPrivateLinkSubnetsAccepted=True", customNodeClassName),
+					func(ctx context.Context) (*hyperkarpenterv1.OpenshiftEC2NodeClass, error) {
+						nc := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+						err := guestClient.Get(ctx, crclient.ObjectKey{Name: customNodeClassName}, nc)
+						return nc, err
+					},
+					[]e2eutil.Predicate[*hyperkarpenterv1.OpenshiftEC2NodeClass]{
+						e2eutil.ConditionPredicate[*hyperkarpenterv1.OpenshiftEC2NodeClass](e2eutil.Condition{
+							Type:   hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+							Status: metav1.ConditionTrue,
+						}),
+					},
+					e2eutil.WithTimeout(5*time.Minute),
+				)
+				t.Logf("AWSPrivateLinkSubnetsAccepted=True confirmed on good NodeClass")
 
 				// Step 6: Verify ConfigMap is created with exactly the custom subnet.
 				// The default nodeclass (Spec.SubnetSelectorTerms==nil) is excluded by the
