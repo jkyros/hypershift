@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -37,11 +36,13 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/go-logr/logr"
@@ -92,6 +93,16 @@ func awsEndpointServicesByName(ns string) []reconcile.Request {
 }
 
 func (r *AWSEndpointServiceReconciler) SetupWithManager(mgr ctrl.Manager) error {
+	// Filter ConfigMap events to only the karpenter-subnets ConfigMap before they
+	// reach the work queue. The shared cache informer (which other controllers in
+	// this manager also use) is unavoidably unfiltered; WithPredicates is the
+	// correct gate here — zero extra connections or memory, pure event filtering.
+	isKarpenterSubnetsConfigMap := predicate.NewPredicateFuncs(func(obj client.Object) bool {
+		lbls := obj.GetLabels()
+		return lbls["hypershift.openshift.io/managed-by"] == "karpenter" &&
+			obj.GetName() == karpenterutil.KarpenterSubnetsConfigMapName
+	})
+
 	_, err := ctrl.NewControllerManagedBy(mgr).
 		For(&hyperv1.AWSEndpointService{}).
 		Watches(&hyperv1.NodePool{}, handler.Funcs{
@@ -103,7 +114,7 @@ func (r *AWSEndpointServiceReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Watches(&corev1.ConfigMap{}, handler.Funcs{
 			CreateFunc: r.enqueueOnKarpenterConfigMapCreate(mgr),
 			UpdateFunc: r.enqueueOnKarpenterConfigMapChange(mgr),
-		}).
+		}, builder.WithPredicates(isKarpenterSubnetsConfigMap)).
 		WithOptions(controller.Options{
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](3*time.Second, 30*time.Second),
 			MaxConcurrentReconciles: 10,
@@ -199,28 +210,14 @@ func (r *AWSEndpointServiceReconciler) enqueueOnHostedClusterChange(mgr ctrl.Man
 
 func (r *AWSEndpointServiceReconciler) enqueueOnKarpenterConfigMapChange(mgr ctrl.Manager) func(context.Context, event.UpdateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	return func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-		logger := mgr.GetLogger()
-		newCM, isOk := e.ObjectNew.(*corev1.ConfigMap)
-		if !isOk {
-			logger.Info("WARNING: enqueueOnKarpenterConfigMapChange: new resource is not of type ConfigMap")
+		// WithPredicates on the Watches call already gates on label+name; only
+		// enqueue when the subnet IDs themselves changed.
+		oldCM, _ := e.ObjectOld.(*corev1.ConfigMap)
+		newCM, _ := e.ObjectNew.(*corev1.ConfigMap)
+		if oldCM == nil || newCM == nil {
 			return
 		}
-		oldCM, isOk := e.ObjectOld.(*corev1.ConfigMap)
-		if !isOk {
-			logger.Info("WARNING: enqueueOnKarpenterConfigMapChange: old resource is not of type ConfigMap")
-			return
-		}
-
-		// Only process karpenter-subnets ConfigMap
-		labels := newCM.GetLabels()
-		if labels == nil || labels["hypershift.openshift.io/managed-by"] != "karpenter" || newCM.Name != karpenterutil.KarpenterSubnetsConfigMapName {
-			return
-		}
-
-		// Only enqueue if subnet IDs actually changed
-		oldSubnets := oldCM.Data["subnetIDs"]
-		newSubnets := newCM.Data["subnetIDs"]
-		if oldSubnets != newSubnets {
+		if oldCM.Data["subnetIDs"] != newCM.Data["subnetIDs"] {
 			for _, req := range awsEndpointServicesByName(newCM.Namespace) {
 				q.Add(req)
 			}
@@ -230,17 +227,8 @@ func (r *AWSEndpointServiceReconciler) enqueueOnKarpenterConfigMapChange(mgr ctr
 
 func (r *AWSEndpointServiceReconciler) enqueueOnKarpenterConfigMapCreate(mgr ctrl.Manager) func(context.Context, event.CreateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
 	return func(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
-		logger := mgr.GetLogger()
-		cm, isOk := e.Object.(*corev1.ConfigMap)
-		if !isOk {
-			logger.Info("WARNING: enqueueOnKarpenterConfigMapCreate: resource is not of type ConfigMap")
-			return
-		}
-		labels := cm.GetLabels()
-		if labels == nil || labels["hypershift.openshift.io/managed-by"] != "karpenter" || cm.Name != karpenterutil.KarpenterSubnetsConfigMapName {
-			return
-		}
-		for _, req := range awsEndpointServicesByName(cm.Namespace) {
+		// WithPredicates on the Watches call already gates on label+name.
+		for _, req := range awsEndpointServicesByName(e.Object.GetNamespace()) {
 			q.Add(req)
 		}
 	}
@@ -320,7 +308,7 @@ func (r *AWSEndpointServiceReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Reconcile the AWSEndpointService Spec
 	if _, err := r.CreateOrUpdate(ctx, r.Client, awsEndpointService, func() error {
-		return reconcileAWSEndpointService(ctx, r, r.ec2Client, awsEndpointService, hc)
+		return reconcileAWSEndpointService(ctx, r, awsEndpointService, hc)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile AWSEndpointService spec: %w", err)
 	}
@@ -365,7 +353,7 @@ func (r *AWSEndpointServiceReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-func reconcileAWSEndpointService(ctx context.Context, c client.Client, ec2Client ec2iface.EC2API, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
+func reconcileAWSEndpointService(ctx context.Context, c client.Client, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
 	if awsEndpointService.Annotations == nil {
 		awsEndpointService.Annotations = make(map[string]string)
 	}
@@ -422,9 +410,7 @@ func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNa
 		subnetIDSet.Insert(karpenterSubnets...)
 	}
 
-	subnetIDs := subnetIDSet.List()
-	sort.Strings(subnetIDs)
-	return subnetIDs, nil
+	return subnetIDSet.List(), nil
 }
 
 

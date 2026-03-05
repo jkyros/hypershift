@@ -73,7 +73,7 @@ func TestKarpenter(t *testing.T) {
 			t.Run("ConfigMap subnet aggregation", func(t *testing.T) {
 				g := NewWithT(t)
 
-				hcpNamespace := fmt.Sprintf("%s-%s", hostedCluster.Namespace, hostedCluster.Name)
+				hcpNamespace := manifests.HostedControlPlaneNamespace(hostedCluster.Namespace, hostedCluster.Name)
 
 				// Phase 1: Stabilize the cluster.
 				//
@@ -322,8 +322,15 @@ func TestKarpenter(t *testing.T) {
 
 				nodeClassList := &hyperkarpenterv1.OpenshiftEC2NodeClassList{}
 				g.Expect(guestClient.List(ctx, nodeClassList)).To(Succeed())
-				if len(nodeClassList.Items) == 0 {
-					t.Logf("All user-defined OpenshiftEC2NodeClass resources deleted; ConfigMap should be removed")
+				hasUserDefinedSubnets := false
+				for _, nc := range nodeClassList.Items {
+					if nc.Spec.SubnetSelectorTerms != nil {
+						hasUserDefinedSubnets = true
+						break
+					}
+				}
+				if !hasUserDefinedSubnets {
+					t.Logf("No remaining OpenshiftEC2NodeClass resources with SubnetSelectorTerms; ConfigMap should be removed")
 					err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 1*time.Minute, true, func(ctx context.Context) (bool, error) {
 						cm := &corev1.ConfigMap{}
 						err := mgtClient.Get(ctx, crclient.ObjectKey{
@@ -332,13 +339,10 @@ func TestKarpenter(t *testing.T) {
 						}, cm)
 						return err != nil && crclient.IgnoreNotFound(err) == nil, nil
 					})
-					if err == nil {
-						t.Logf("ConfigMap successfully cleaned up")
-					} else {
-						t.Logf("ConfigMap still exists (may be used by other NodeClasses)")
-					}
+					g.Expect(err).NotTo(HaveOccurred(), "ConfigMap should be cleaned up when no user-defined NodeClasses with SubnetSelectorTerms remain")
+					t.Logf("ConfigMap successfully cleaned up")
 				} else {
-					t.Logf("Other OpenshiftEC2NodeClass resources exist; ConfigMap should remain")
+					t.Logf("Other OpenshiftEC2NodeClass resources with SubnetSelectorTerms exist; ConfigMap should remain")
 				}
 			})
 		}).Execute(&subnetClusterOpts, globalOpts.Platform, globalOpts.ArtifactDir,
