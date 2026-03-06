@@ -22,9 +22,11 @@ import (
 	karpenteroperatorcpov2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenteroperator"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
 	karpenterassets "github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
+	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 	dto "github.com/prometheus/client_model/go"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	policyv1 "k8s.io/api/policy/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/utils/ptr"
 	crclient "sigs.k8s.io/controller-runtime/pkg/client"
 	karpenterv1 "sigs.k8s.io/karpenter/pkg/apis/v1"
 	"sigs.k8s.io/yaml"
@@ -653,6 +656,112 @@ func TestKarpenter(t *testing.T) {
 				e2eutil.WithTimeout(2*time.Minute),
 			)
 			t.Logf("OpenshiftEC2NodeClass %q has SupportedVersionSkew=False for version %s (exceeds n-3 skew from CP %s)", nc.Name, skewVersion, cpVersion)
+		})
+
+		t.Run("OpenshiftEC2NodeClass KubeletConfig propagation", func(t *testing.T) {
+			g := NewWithT(t)
+
+			hcpNamespace := manifests.HostedControlPlaneNamespace(hostedCluster.Namespace, hostedCluster.Name)
+
+			// Get the default OpenshiftEC2NodeClass from the guest cluster
+			nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+			err := guestClient.Get(ctx, crclient.ObjectKey{Name: "default"}, nodeClass)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Patch it to set maxPods: 500
+			err = e2eutil.UpdateObject(t, ctx, guestClient, nodeClass, func(obj *hyperkarpenterv1.OpenshiftEC2NodeClass) {
+				obj.Spec.KubeletConfig = &hyperkarpenterv1.KubeletConfig{
+					MaxPods: ptr.To[int32](500),
+				}
+			})
+			g.Expect(err).NotTo(HaveOccurred())
+			t.Logf("Patched default OpenshiftEC2NodeClass with maxPods: 500")
+
+			// Defer cleanup: revert KubeletConfig to nil
+			defer func() {
+				if err := e2eutil.UpdateObject(t, ctx, guestClient, nodeClass, func(obj *hyperkarpenterv1.OpenshiftEC2NodeClass) {
+					obj.Spec.KubeletConfig = nil
+				}); err != nil {
+					t.Logf("failed to revert OpenshiftEC2NodeClass KubeletConfig: %v", err)
+				}
+			}()
+
+			// Wait for the per-nodeclass KubeletConfig ConfigMap to appear in the HCP namespace
+			kubeletCMName := karpenterutil.KarpenterNodeClassKubeletConfigName("default")
+			t.Logf("Waiting for KubeletConfig ConfigMap %s/%s to appear", hcpNamespace, kubeletCMName)
+			g.Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				err := mgtClient.Get(ctx, crclient.ObjectKey{Name: kubeletCMName, Namespace: hcpNamespace}, cm)
+				g.Expect(err).NotTo(HaveOccurred())
+				g.Expect(cm.Labels).To(HaveKeyWithValue(karpenterutil.KarpenterNodeClassKubeletConfigLabel, "true"))
+				g.Expect(cm.Data).To(HaveKey("config"))
+				g.Expect(cm.Data["config"]).To(ContainSubstring("maxPods"))
+				g.Expect(cm.Data["config"]).To(ContainSubstring("500"))
+			}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+			t.Logf("KubeletConfig ConfigMap %s is present and correct", kubeletCMName)
+
+			// Create Karpenter NodePool and workloads to provision nodes with the new kubelet config
+			testNodePool := karpenterNodePool.DeepCopy()
+			testWorkLoads := workLoads.DeepCopy()
+			testNodePool.SetResourceVersion("")
+			testWorkLoads.SetResourceVersion("")
+			testNodePool.SetName("kubelet-config-test")
+			testWorkLoads.SetName("kubelet-config-web-app")
+
+			replicas := 1
+			testWorkLoads.Object["spec"].(map[string]interface{})["replicas"] = replicas
+
+			defer func() {
+				_ = guestClient.Delete(ctx, testWorkLoads)
+				_ = guestClient.Delete(ctx, testNodePool)
+			}()
+
+			g.Expect(guestClient.Create(ctx, testNodePool)).To(Succeed())
+			t.Logf("Created Karpenter NodePool %s", testNodePool.GetName())
+			g.Expect(guestClient.Create(ctx, testWorkLoads)).To(Succeed())
+			t.Logf("Created workloads %s", testWorkLoads.GetName())
+
+			testNodeLabels := map[string]string{
+				"node.kubernetes.io/instance-type": "t3.large",
+				"karpenter.sh/nodepool":            testNodePool.GetName(),
+			}
+
+			// Wait for nodes to be provisioned
+			nodes := e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, int32(replicas), testNodeLabels)
+			t.Logf("Karpenter nodes are ready")
+
+			// Load and create the kubelet checker DaemonSet
+			dsBytes, err := content.ReadFile("assets/karpenter-kubelet-checker-ds.yaml")
+			g.Expect(err).NotTo(HaveOccurred())
+			checkerDS := &appsv1.DaemonSet{}
+			err = yaml.Unmarshal(dsBytes, checkerDS)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Scope the DaemonSet to only run on the karpenter test nodes via a node selector
+			if checkerDS.Spec.Template.Spec.NodeSelector == nil {
+				checkerDS.Spec.Template.Spec.NodeSelector = map[string]string{}
+			}
+			checkerDS.Spec.Template.Spec.NodeSelector["karpenter.sh/nodepool"] = testNodePool.GetName()
+
+			defer func() {
+				_ = guestClient.Delete(ctx, checkerDS)
+			}()
+
+			g.Expect(guestClient.Create(ctx, checkerDS)).To(Succeed())
+			t.Logf("Created karpenter-kubelet-checker DaemonSet")
+
+			// nodePool arg to eventuallyDaemonSetRollsOut is only used for timeout calculation (KubeVirt gets longer)
+			// build a minimal NodePool to pass through
+			minimalNP := &hyperv1.NodePool{}
+			minimalNP.Spec.Platform.Type = hyperv1.AWSPlatform
+
+			eventuallyDaemonSetRollsOut(t, ctx, guestClient, len(nodes), minimalNP, checkerDS)
+			t.Logf("karpenter-kubelet-checker DaemonSet pods are ready — kubelet maxPods=500 confirmed on nodes")
+
+			// Cleanup workloads and NodePool
+			g.Expect(guestClient.Delete(ctx, testWorkLoads)).To(Succeed())
+			g.Expect(guestClient.Delete(ctx, testNodePool)).To(Succeed())
+			_ = e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, 0, testNodeLabels)
 		})
 
 		// TODO(jkyros): This test doesn't clean up after itself (I think intentionally) so we can test general cluster
