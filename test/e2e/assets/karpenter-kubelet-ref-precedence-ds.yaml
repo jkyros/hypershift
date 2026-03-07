@@ -1,21 +1,21 @@
 apiVersion: apps/v1
 kind: DaemonSet
 metadata:
-  name: karpenter-kubelet-checker
+  name: karpenter-kubelet-ref-precedence
   namespace: kube-system
 spec:
   selector:
     matchLabels:
-      name: karpenter-kubelet-checker
+      name: karpenter-kubelet-ref-precedence
   template:
     metadata:
       labels:
-        name: karpenter-kubelet-checker
+        name: karpenter-kubelet-ref-precedence
     spec:
       tolerations:
       - operator: Exists
       containers:
-      - name: karpenter-kubelet-checker
+      - name: karpenter-kubelet-ref-precedence
         image: alpine
         command:
         - /bin/sleep
@@ -29,7 +29,8 @@ spec:
             command:
             - /bin/sh
             - -c
-            - "grep '\"maxPods\":500' /host/etc/kubernetes/kubelet.conf"
+            - |
+              grep '"maxPods":500' /host/etc/kubernetes/kubelet.conf
         volumeMounts:
         - name: host
           mountPath: /host

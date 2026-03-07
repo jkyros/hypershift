@@ -21,6 +21,7 @@ limitations under the License.
 package v1beta1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 )
@@ -303,6 +304,11 @@ func (in *OpenshiftEC2NodeClassSpec) DeepCopyInto(out *OpenshiftEC2NodeClassSpec
 		in, out := &in.KubeletConfig, &out.KubeletConfig
 		*out = new(KubeletConfig)
 		(*in).DeepCopyInto(*out)
+	}
+	if in.Config != nil {
+		in, out := &in.Config, &out.Config
+		*out = make([]corev1.LocalObjectReference, len(*in))
+		copy(*out, *in)
 	}
 }
 

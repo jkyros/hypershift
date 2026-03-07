@@ -233,9 +233,12 @@ func (r *KarpenterIgnitionReconciler) createInMemoryNodePool(
 	}
 	if openshiftEC2NodeClass.Spec.KubeletConfig != nil {
 		configRefs = append(configRefs, corev1.LocalObjectReference{
+			// We explicitly prefix the explicit KubeletConfig's name with zz- so wins the MCO
+			// config merge and supersedes any other KubletConfigs when it exists
 			Name: karpenterutil.KarpenterNodeClassKubeletConfigName(openshiftEC2NodeClass.Name),
 		})
 	}
+	configRefs = append(configRefs, openshiftEC2NodeClass.Spec.Config...)
 
 	return &hyperv1.NodePool{
 		ObjectMeta: metav1.ObjectMeta{
@@ -418,7 +421,8 @@ func (r *KarpenterIgnitionReconciler) reconcileKubeletConfigMap(
 		return nil
 	}
 
-	manifest, err := openshiftEC2NodeClass.Spec.KubeletConfig.ToKubeletConfigManifest(configMapName)
+	crName := karpenterutil.KarpenterNodeClassKubeletConfigCRName(openshiftEC2NodeClass.Name)
+	manifest, err := openshiftEC2NodeClass.Spec.KubeletConfig.ToKubeletConfigManifest(crName)
 	if err != nil {
 		return fmt.Errorf("failed to generate kubelet config manifest: %w", err)
 	}

@@ -658,35 +658,64 @@ func TestKarpenter(t *testing.T) {
 			t.Logf("OpenshiftEC2NodeClass %q has SupportedVersionSkew=False for version %s (exceeds n-3 skew from CP %s)", nc.Name, skewVersion, cpVersion)
 		})
 
-		t.Run("OpenshiftEC2NodeClass KubeletConfig propagation", func(t *testing.T) {
+		t.Run("OpenshiftEC2NodeClass KubeletConfig and specConfig combined delivery", func(t *testing.T) {
 			g := NewWithT(t)
 
 			hcpNamespace := manifests.HostedControlPlaneNamespace(hostedCluster.Namespace, hostedCluster.Name)
+
+			// Create a ConfigMap in the HCP namespace containing a KubeletConfig manifest with podsPerCore: 5.
+			// This simulates an OCM-delivered kubelet config referenced via spec.config. In the supersede
+			// model, spec.KubeletConfig wins entirely, so this OCM ref passes through the NodePool pipeline
+			// unchanged and the user's kubelet config (maxPods:500) is delivered via the karpenter kubelet CM.
+			podsPerCoreCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "kubelet-config-e2e-podspercore",
+					Namespace: hcpNamespace,
+				},
+				Data: map[string]string{
+					"config": `apiVersion: machineconfiguration.openshift.io/v1
+kind: KubeletConfig
+metadata:
+  name: kubelet-config-e2e-podspercore
+spec:
+  kubeletConfig: {"podsPerCore":5}`,
+				},
+			}
+			g.Expect(mgtClient.Create(ctx, podsPerCoreCM)).To(Succeed())
+			t.Logf("Created OCM kubelet ConfigMap %s/%s (podsPerCore:5)", hcpNamespace, podsPerCoreCM.Name)
+			defer func() {
+				_ = mgtClient.Delete(ctx, podsPerCoreCM)
+			}()
 
 			// Get the default OpenshiftEC2NodeClass from the guest cluster
 			nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
 			err := guestClient.Get(ctx, crclient.ObjectKey{Name: "default"}, nodeClass)
 			g.Expect(err).NotTo(HaveOccurred())
 
-			// Patch it to set maxPods: 500
+			// Patch it to set maxPods: 500 (via spec.kubeletConfig) and reference the podsPerCore ConfigMap.
+			// spec.KubeletConfig supersedes entirely: the karpenter kubelet CM will have only maxPods:500.
 			err = e2eutil.UpdateObject(t, ctx, guestClient, nodeClass, func(obj *hyperkarpenterv1.OpenshiftEC2NodeClass) {
 				obj.Spec.KubeletConfig = &hyperkarpenterv1.KubeletConfig{
 					MaxPods: ptr.To[int32](500),
 				}
+				obj.Spec.Config = []corev1.LocalObjectReference{
+					{Name: podsPerCoreCM.Name},
+				}
 			})
 			g.Expect(err).NotTo(HaveOccurred())
-			t.Logf("Patched default OpenshiftEC2NodeClass with maxPods: 500")
+			t.Logf("Patched default OpenshiftEC2NodeClass with maxPods: 500 (user) and spec.config referencing %s (OCM, podsPerCore:5)", podsPerCoreCM.Name)
 
-			// Defer cleanup: revert KubeletConfig to nil
+			// Defer cleanup: revert KubeletConfig and Config to nil
 			defer func() {
 				if err := e2eutil.UpdateObject(t, ctx, guestClient, nodeClass, func(obj *hyperkarpenterv1.OpenshiftEC2NodeClass) {
 					obj.Spec.KubeletConfig = nil
+					obj.Spec.Config = nil
 				}); err != nil {
-					t.Logf("failed to revert OpenshiftEC2NodeClass KubeletConfig: %v", err)
+					t.Logf("failed to revert OpenshiftEC2NodeClass KubeletConfig/Config: %v", err)
 				}
 			}()
 
-			// Wait for the per-nodeclass KubeletConfig ConfigMap to appear in the HCP namespace
+			// Wait for the per-nodeclass KubeletConfig ConfigMap to appear in the HCP namespace with maxPods:500.
 			kubeletCMName := karpenterutil.KarpenterNodeClassKubeletConfigName("default")
 			t.Logf("Waiting for KubeletConfig ConfigMap %s/%s to appear", hcpNamespace, kubeletCMName)
 			g.Eventually(func(g Gomega) {
@@ -730,8 +759,8 @@ func TestKarpenter(t *testing.T) {
 			nodes := e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, int32(replicas), testNodeLabels)
 			t.Logf("Karpenter nodes are ready")
 
-			// Load and create the kubelet checker DaemonSet
-			dsBytes, err := content.ReadFile("assets/karpenter-kubelet-checker-ds.yaml")
+			// Load and create the ref-precedence DaemonSet — verifies maxPods=500 from user spec.kubeletConfig.
+			dsBytes, err := content.ReadFile("assets/karpenter-kubelet-ref-precedence-ds.yaml")
 			g.Expect(err).NotTo(HaveOccurred())
 			checkerDS := &appsv1.DaemonSet{}
 			err = yaml.Unmarshal(dsBytes, checkerDS)
@@ -748,7 +777,7 @@ func TestKarpenter(t *testing.T) {
 			}()
 
 			g.Expect(guestClient.Create(ctx, checkerDS)).To(Succeed())
-			t.Logf("Created karpenter-kubelet-checker DaemonSet")
+			t.Logf("Created karpenter-kubelet-ref-precedence DaemonSet")
 
 			// nodePool arg to eventuallyDaemonSetRollsOut is only used for timeout calculation (KubeVirt gets longer)
 			// build a minimal NodePool to pass through
@@ -756,7 +785,7 @@ func TestKarpenter(t *testing.T) {
 			minimalNP.Spec.Platform.Type = hyperv1.AWSPlatform
 
 			eventuallyDaemonSetRollsOut(t, ctx, guestClient, len(nodes), minimalNP, checkerDS)
-			t.Logf("karpenter-kubelet-checker DaemonSet pods are ready — kubelet maxPods=500 confirmed on nodes")
+			t.Logf("karpenter-kubelet-ref-precedence DaemonSet pods are ready — user maxPods=500 applied from spec.kubeletConfig")
 
 			// Cleanup workloads and NodePool
 			g.Expect(guestClient.Delete(ctx, testWorkLoads)).To(Succeed())

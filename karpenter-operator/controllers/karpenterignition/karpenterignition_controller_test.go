@@ -1196,6 +1196,73 @@ func TestCreateInMemoryNodePool_WhenKubeletConfigIsSet_ItShouldIncludeKubeletCon
 	g.Expect(np.Spec.Config[1].Name).To(Equal(karpenterutil.KarpenterNodeClassKubeletConfigName(testNodeClassName)))
 }
 
+func TestCreateInMemoryNodePool_WhenSpecConfigIsSet_ItShouldAppendUserConfigRefs(t *testing.T) {
+	g := NewWithT(t)
+	r := &KarpenterIgnitionReconciler{}
+	hcp := &hyperv1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-hcp",
+			Namespace: testNamespace,
+		},
+		Spec: hyperv1.HostedControlPlaneSpec{
+			ReleaseImage: "quay.io/openshift-release-dev/ocp-release:4.17.0-x86_64",
+		},
+	}
+	nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testNodeClassName,
+		},
+		Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+			Config: []corev1.LocalObjectReference{
+				{Name: "kubelet-config-ocm-custom-kubelet"},
+				{Name: "my-machine-config"},
+			},
+		},
+	}
+
+	np := r.createInMemoryNodePool(hcp, nodeClass, hcp.Spec.ReleaseImage)
+
+	g.Expect(np.Spec.Config).To(HaveLen(3))
+	g.Expect(np.Spec.Config[0].Name).To(Equal(karpenterutil.KarpenterTaintConfigMapName))
+	g.Expect(np.Spec.Config[1].Name).To(Equal("kubelet-config-ocm-custom-kubelet"))
+	g.Expect(np.Spec.Config[2].Name).To(Equal("my-machine-config"))
+}
+
+func TestCreateInMemoryNodePool_WhenKubeletConfigAndSpecConfigAreSet_ItShouldIncludeAllConfigRefs(t *testing.T) {
+	g := NewWithT(t)
+	r := &KarpenterIgnitionReconciler{}
+	hcp := &hyperv1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-hcp",
+			Namespace: testNamespace,
+		},
+		Spec: hyperv1.HostedControlPlaneSpec{
+			ReleaseImage: "quay.io/openshift-release-dev/ocp-release:4.17.0-x86_64",
+		},
+	}
+	maxPods := int32(500)
+	nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: testNodeClassName,
+		},
+		Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+			KubeletConfig: &hyperkarpenterv1.KubeletConfig{
+				MaxPods: &maxPods,
+			},
+			Config: []corev1.LocalObjectReference{
+				{Name: "kubelet-config-ocm-custom-kubelet"},
+			},
+		},
+	}
+
+	np := r.createInMemoryNodePool(hcp, nodeClass, hcp.Spec.ReleaseImage)
+
+	g.Expect(np.Spec.Config).To(HaveLen(3))
+	g.Expect(np.Spec.Config[0].Name).To(Equal(karpenterutil.KarpenterTaintConfigMapName))
+	g.Expect(np.Spec.Config[1].Name).To(Equal(karpenterutil.KarpenterNodeClassKubeletConfigName(testNodeClassName)))
+	g.Expect(np.Spec.Config[2].Name).To(Equal("kubelet-config-ocm-custom-kubelet"))
+}
+
 func TestReconcileKubeletConfigMap_WhenKubeletConfigIsNil_ItShouldDeleteConfigMap(t *testing.T) {
 	g := NewWithT(t)
 	scheme := api.Scheme
@@ -1284,4 +1351,7 @@ func TestReconcileKubeletConfigMap_WhenKubeletConfigIsSet_ItShouldCreateConfigMa
 	g.Expect(cm.Data["config"]).To(ContainSubstring("maxPods"))
 	g.Expect(cm.Data["config"]).To(ContainSubstring("500"))
 	g.Expect(cm.Data["config"]).To(ContainSubstring("KubeletConfig"))
+	// The CR name inside the manifest must carry the zz- prefix so it sorts after OCM-delivered
+	// configs (prefixed "99-") when the MCO merges on-node. The ConfigMap name itself has no prefix.
+	g.Expect(cm.Data["config"]).To(ContainSubstring(karpenterutil.KarpenterNodeClassKubeletConfigCRName(testNodeClassName)))
 }
