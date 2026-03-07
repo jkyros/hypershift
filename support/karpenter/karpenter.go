@@ -29,6 +29,14 @@ func KarpenterNodeClassKubeletConfigName(nodeClassName string) string {
 	return fmt.Sprintf("karpenter-kubelet-%s", nodeClassName)
 }
 
+// KarpenterNodeClassKubeletConfigCRName returns the name used for the KubeletConfig CR
+// inside the ConfigMap manifest. The "zz-" prefix ensures it sorts after OCM-delivered
+// configs (prefixed "99-") when the MCO merges configs on-node, so inline KubeletConfig
+// settings take precedence.
+func KarpenterNodeClassKubeletConfigCRName(nodeClassName string) string {
+	return fmt.Sprintf("zz-karpenter-kubelet-%s", nodeClassName)
+}
+
 // ErrHCPNotFound is returned when no HostedControlPlane is found in the namespace.
 var ErrHCPNotFound = errors.New("hostedcontrolplane not found")
 

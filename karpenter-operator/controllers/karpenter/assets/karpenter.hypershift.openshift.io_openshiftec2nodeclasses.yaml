@@ -156,6 +156,39 @@ spec:
                 - message: must have only one blockDeviceMappings with rootVolume
                   rule: self.filter(x, has(x.rootVolume)?x.rootVolume==true:false).size()
                     <= 1
+              config:
+                description: |-
+                  Config is a list of references to ConfigMaps containing serialized
+                  MachineConfig resources to be injected into the ignition configurations of
+                  nodes provisioned by this NodeClass. Accepts the same resource types as
+                  NodePool.Spec.Config:
+                    - KubeletConfig
+                    - ContainerRuntimeConfig
+                    - MachineConfig
+                    - ClusterImagePolicy
+                    - ImageContentSourcePolicy
+                    - ImageDigestMirrorSet
+
+                  Each ConfigMap must have a single key named "config" whose value is the YAML
+                  with one or more serialized machineconfiguration.openshift.io resources.
+                  ConfigMaps are looked up in the HCP namespace.
+                items:
+                  description: |-
+                    LocalObjectReference contains enough information to let you locate the
+                    referenced object inside the same namespace.
+                  properties:
+                    name:
+                      default: ""
+                      description: |-
+                        Name of the referent.
+                        This field is effectively required, but due to backwards compatibility is
+                        allowed to be empty. Instances of this type with an empty value here are
+                        almost certainly wrong.
+                        More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                      type: string
+                  type: object
+                  x-kubernetes-map-type: atomic
+                type: array
               detailedMonitoring:
                 description: DetailedMonitoring controls if detailed monitoring is
                   enabled for instances that are launched
