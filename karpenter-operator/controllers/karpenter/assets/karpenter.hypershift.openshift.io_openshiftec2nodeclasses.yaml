@@ -201,7 +201,7 @@ spec:
                 type: string
               kubelet:
                 description: |-
-                  Kubelet configures kubelet settings for nodes provisioned by this NodeClass.
+                  KubeletConfiguration configures kubelet settings for nodes provisioned by this NodeClass.
                   These settings are injected into the node's ignition configuration via MachineConfig.
                 properties:
                   clusterDNS:
