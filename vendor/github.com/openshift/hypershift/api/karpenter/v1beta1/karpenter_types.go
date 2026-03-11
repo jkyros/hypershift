@@ -192,7 +192,6 @@ type OpenshiftEC2NodeClassSpec struct {
 	// Kubelet configures kubelet settings for nodes provisioned by this NodeClass.
 	// These settings are injected into the node's ignition configuration via MachineConfig.
 	// +optional
-
 	Kubelet *KubeletConfiguration `json:"kubelet,omitempty"`
 
 	// Config is a list of references to ConfigMaps containing serialized

@@ -234,7 +234,8 @@ func (r *KarpenterIgnitionReconciler) createInMemoryNodePool(
 	if openshiftEC2NodeClass.Spec.Kubelet != nil {
 		configRefs = append(configRefs, corev1.LocalObjectReference{
 			// We explicitly prefix the KubeletConfig's name with zz- so wins the MCO
-			// config merge and supersedes any other KubletConfigs when it exists
+			// config merge and supersedes any other KubeletConfigs when it exists. The MCO's
+			// merge is per-file not per-key.
 			Name: karpenterutil.KarpenterNodeClassKubeletConfigName(openshiftEC2NodeClass.Name),
 		})
 	}

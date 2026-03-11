@@ -764,6 +764,121 @@ func TestKarpenter(t *testing.T) {
 			_ = e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, 0, testNodeLabels)
 		})
 
+		t.Run("OpenshiftEC2NodeClass config field propagation", func(t *testing.T) {
+			g := NewWithT(t)
+
+			hcpNamespace := manifests.HostedControlPlaneNamespace(hostedCluster.Namespace, hostedCluster.Name)
+
+			// Create a ConfigMap in the HCP namespace containing a KubeletConfig with maxPods: 501.
+			kubeletConfigYAML := `apiVersion: machineconfiguration.openshift.io/v1
+kind: KubeletConfig
+metadata:
+  name: karpenter-config-test-kubelet
+spec:
+  kubeletConfig:
+    maxPods: 501
+`
+			configCM := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "karpenter-config-test-kubelet",
+					Namespace: hcpNamespace,
+				},
+				Data: map[string]string{
+					"config": kubeletConfigYAML,
+				},
+			}
+			g.Expect(mgtClient.Create(ctx, configCM)).To(Succeed())
+			t.Logf("Created ConfigMap %s/%s with KubeletConfig maxPods=501", hcpNamespace, configCM.Name)
+
+			// Defer cleanup: delete the ConfigMap and revert spec.config on the NodeClass.
+			defer func() {
+				_ = mgtClient.Delete(ctx, configCM)
+			}()
+
+			// Get the default OpenshiftEC2NodeClass and patch spec.config to reference the ConfigMap.
+			nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+			err := guestClient.Get(ctx, crclient.ObjectKey{Name: "default"}, nodeClass)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			err = e2eutil.UpdateObject(t, ctx, guestClient, nodeClass, func(obj *hyperkarpenterv1.OpenshiftEC2NodeClass) {
+				obj.Spec.Config = []corev1.LocalObjectReference{
+					{Name: configCM.Name},
+				}
+			})
+			g.Expect(err).NotTo(HaveOccurred())
+			t.Logf("Patched default OpenshiftEC2NodeClass spec.config to reference %s", configCM.Name)
+
+			defer func() {
+				if err := e2eutil.UpdateObject(t, ctx, guestClient, nodeClass, func(obj *hyperkarpenterv1.OpenshiftEC2NodeClass) {
+					obj.Spec.Config = nil
+				}); err != nil {
+					t.Logf("failed to revert OpenshiftEC2NodeClass Config: %v", err)
+				}
+			}()
+
+			// Create NodePool and workloads to provision nodes with the config-delivered KubeletConfig.
+			testNodePool := karpenterNodePool.DeepCopy()
+			testWorkLoads := workLoads.DeepCopy()
+			testNodePool.SetResourceVersion("")
+			testWorkLoads.SetResourceVersion("")
+			testNodePool.SetName("config-field-test")
+			testWorkLoads.SetName("config-field-web-app")
+
+			replicas := 1
+			testWorkLoads.Object["spec"].(map[string]interface{})["replicas"] = replicas
+
+			defer func() {
+				_ = guestClient.Delete(ctx, testWorkLoads)
+				_ = guestClient.Delete(ctx, testNodePool)
+			}()
+
+			g.Expect(guestClient.Create(ctx, testNodePool)).To(Succeed())
+			t.Logf("Created Karpenter NodePool %s", testNodePool.GetName())
+			g.Expect(guestClient.Create(ctx, testWorkLoads)).To(Succeed())
+			t.Logf("Created workloads %s", testWorkLoads.GetName())
+
+			testNodeLabels := map[string]string{
+				"node.kubernetes.io/instance-type": "t3.large",
+				"karpenter.sh/nodepool":            testNodePool.GetName(),
+			}
+
+			// Wait for nodes to be provisioned.
+			nodes := e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, int32(replicas), testNodeLabels)
+			t.Logf("Karpenter nodes are ready")
+
+			// Load and create the config checker DaemonSet (checks for maxPods:501).
+			dsBytes, err := content.ReadFile("assets/karpenter-config-checker-ds.yaml")
+			g.Expect(err).NotTo(HaveOccurred())
+			checkerDS := &appsv1.DaemonSet{}
+			err = yaml.Unmarshal(dsBytes, checkerDS)
+			g.Expect(err).NotTo(HaveOccurred())
+
+			// Scope the DaemonSet to only run on the karpenter test nodes via a node selector.
+			if checkerDS.Spec.Template.Spec.NodeSelector == nil {
+				checkerDS.Spec.Template.Spec.NodeSelector = map[string]string{}
+			}
+			checkerDS.Spec.Template.Spec.NodeSelector["karpenter.sh/nodepool"] = testNodePool.GetName()
+
+			defer func() {
+				_ = guestClient.Delete(ctx, checkerDS)
+			}()
+
+			g.Expect(guestClient.Create(ctx, checkerDS)).To(Succeed())
+			t.Logf("Created karpenter-config-checker DaemonSet")
+
+			// Build a minimal NodePool to pass through to eventuallyDaemonSetRollsOut.
+			minimalNP := &hyperv1.NodePool{}
+			minimalNP.Spec.Platform.Type = hyperv1.AWSPlatform
+
+			eventuallyDaemonSetRollsOut(t, ctx, guestClient, len(nodes), minimalNP, checkerDS)
+			t.Logf("karpenter-config-checker DaemonSet pods are ready — kubelet maxPods=501 confirmed on nodes")
+
+			// Cleanup workloads and NodePool.
+			g.Expect(guestClient.Delete(ctx, testWorkLoads)).To(Succeed())
+			g.Expect(guestClient.Delete(ctx, testNodePool)).To(Succeed())
+			_ = e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, 0, testNodeLabels)
+		})
+
 		// TODO(jkyros): This test doesn't clean up after itself (I think intentionally) so we can test general cluster
 		// cleanup, but as a result it needs to run last, otherwise it will pollute any other cases that come after it
 		// and its "on-demand" nodepool may service requests that are not intended for it
