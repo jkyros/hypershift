@@ -1202,6 +1202,55 @@ func TestCreateInMemoryNodePool(t *testing.T) {
 		g.Expect(np.Spec.Release.Image).To(Equal(hcp.Spec.ReleaseImage))
 		g.Expect(np.Spec.Arch).To(Equal(hyperv1.ArchitectureAMD64))
 	})
+
+	t.Run("When spec config is set and kubelet config is nil it should append extra config refs after taint ref", func(t *testing.T) {
+		g := NewWithT(t)
+		nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: testNodeClassName,
+			},
+			Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+				Config: []corev1.LocalObjectReference{
+					{Name: "extra-config-1"},
+					{Name: "extra-config-2"},
+				},
+			},
+		}
+
+		np := r.createInMemoryNodePool(hcp, nodeClass, hcp.Spec.ReleaseImage)
+
+		g.Expect(np.Spec.Config).To(HaveLen(3))
+		g.Expect(np.Spec.Config[0].Name).To(Equal(karpenterutil.KarpenterTaintConfigMapName))
+		g.Expect(np.Spec.Config[1].Name).To(Equal("extra-config-1"))
+		g.Expect(np.Spec.Config[2].Name).To(Equal("extra-config-2"))
+	})
+
+	t.Run("When both kubelet config and spec config are set it should order taint then kubelet then extra config refs", func(t *testing.T) {
+		g := NewWithT(t)
+		maxPods := int32(500)
+		nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: testNodeClassName,
+			},
+			Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+				Kubelet: &hyperkarpenterv1.KubeletConfiguration{
+					MaxPods: &maxPods,
+				},
+				Config: []corev1.LocalObjectReference{
+					{Name: "extra-config-1"},
+					{Name: "extra-config-2"},
+				},
+			},
+		}
+
+		np := r.createInMemoryNodePool(hcp, nodeClass, hcp.Spec.ReleaseImage)
+
+		g.Expect(np.Spec.Config).To(HaveLen(4))
+		g.Expect(np.Spec.Config[0].Name).To(Equal(karpenterutil.KarpenterTaintConfigMapName))
+		g.Expect(np.Spec.Config[1].Name).To(Equal(karpenterutil.KarpenterNodeClassKubeletConfigName(testNodeClassName)))
+		g.Expect(np.Spec.Config[2].Name).To(Equal("extra-config-1"))
+		g.Expect(np.Spec.Config[3].Name).To(Equal("extra-config-2"))
+	})
 }
 
 func TestReconcileKubeletConfigMap(t *testing.T) {

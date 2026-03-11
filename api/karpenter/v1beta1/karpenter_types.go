@@ -1,6 +1,7 @@
 package v1beta1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -192,6 +193,23 @@ type OpenshiftEC2NodeClassSpec struct {
 	// These settings are injected into the node's ignition configuration via MachineConfig.
 	// +optional
 	Kubelet *KubeletConfiguration `json:"kubelet,omitempty"`
+
+	// Config is a list of references to ConfigMaps containing serialized
+	// MachineConfig resources to be injected into the ignition configurations of
+	// nodes provisioned by this NodeClass. Accepts the same resource types as
+	// NodePool.Spec.Config:
+	//   - KubeletConfig
+	//   - ContainerRuntimeConfig
+	//   - MachineConfig
+	//   - ClusterImagePolicy
+	//   - ImageContentSourcePolicy
+	//   - ImageDigestMirrorSet
+	//
+	// Each ConfigMap must have a single key named "config" whose value is the YAML
+	// with one or more serialized machineconfiguration.openshift.io resources.
+	// ConfigMaps are looked up in the HCP namespace.
+	// +optional
+	Config []corev1.LocalObjectReference `json:"config,omitempty"`
 }
 
 // SubnetSelectorTerm defines selection logic for a subnet used by Karpenter to launch nodes.

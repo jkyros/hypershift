@@ -233,9 +233,12 @@ func (r *KarpenterIgnitionReconciler) createInMemoryNodePool(
 	}
 	if openshiftEC2NodeClass.Spec.Kubelet != nil {
 		configRefs = append(configRefs, corev1.LocalObjectReference{
+			// We explicitly prefix the KubeletConfig's name with zz- so wins the MCO
+			// config merge and supersedes any other KubletConfigs when it exists
 			Name: karpenterutil.KarpenterNodeClassKubeletConfigName(openshiftEC2NodeClass.Name),
 		})
 	}
+	configRefs = append(configRefs, openshiftEC2NodeClass.Spec.Config...)
 
 	return &hyperv1.NodePool{
 		ObjectMeta: metav1.ObjectMeta{
