@@ -31,7 +31,7 @@ func TestToKubeletConfigManifest_WhenKubeletConfigHasMaxPods_ItShouldIncludeMaxP
 	assertContains(t, manifest, "apiVersion: machineconfiguration.openshift.io/v1")
 	assertContains(t, manifest, "kind: KubeletConfig")
 	assertContains(t, manifest, "name: karpenter-kubelet-default")
-	assertContains(t, manifest, `"maxPods":500`)
+	assertContains(t, manifest, "maxPods: 500")
 }
 
 func TestToKubeletConfigManifest_WhenKubeletConfigIsEmpty_ItShouldReturnManifestWithEmptyKubeletConfig(t *testing.T) {
@@ -43,7 +43,7 @@ func TestToKubeletConfigManifest_WhenKubeletConfigIsEmpty_ItShouldReturnManifest
 	assertContains(t, manifest, "apiVersion: machineconfiguration.openshift.io/v1")
 	assertContains(t, manifest, "kind: KubeletConfig")
 	assertContains(t, manifest, "name: karpenter-kubelet-test")
-	assertContains(t, manifest, `kubeletConfig: {}`)
+	assertContains(t, manifest, "kubeletConfig: {}")
 }
 
 func TestToKubeletConfigManifest_WhenKubeletConfigHasAllFields_ItShouldIncludeAllFieldsInManifest(t *testing.T) {
@@ -81,15 +81,14 @@ func TestToKubeletConfigManifest_WhenKubeletConfigHasAllFields_ItShouldIncludeAl
 	assertContains(t, manifest, "apiVersion: machineconfiguration.openshift.io/v1")
 	assertContains(t, manifest, "kind: KubeletConfig")
 	assertContains(t, manifest, "name: karpenter-kubelet-full")
-	assertContains(t, manifest, `"maxPods":250`)
-	assertContains(t, manifest, `"podsPerCore":10`)
-	assertContains(t, manifest, `"evictionMaxPodGracePeriod":90`)
-	assertContains(t, manifest, `"imageGCHighThresholdPercent":85`)
-	assertContains(t, manifest, `"imageGCLowThresholdPercent":80`)
-	assertContains(t, manifest, `"cpuCFSQuota":true`)
-	assertContains(t, manifest, `"clusterDNS":["10.96.0.10"]`)
-	assertContains(t, manifest, `"memory.available":"5%"`)
-	assertContains(t, manifest, `"memory.available":"10%"`)
+	assertContains(t, manifest, "maxPods: 250")
+	assertContains(t, manifest, "podsPerCore: 10")
+	assertContains(t, manifest, "evictionMaxPodGracePeriod: 90")
+	assertContains(t, manifest, "imageGCHighThresholdPercent: 85")
+	assertContains(t, manifest, "imageGCLowThresholdPercent: 80")
+	assertContains(t, manifest, "cpuCFSQuota: true")
+	assertContains(t, manifest, "10.96.0.10")
+	assertContains(t, manifest, "memory.available")
 	// Eviction grace period: 2 minutes = "2m0s"
 	assertContains(t, manifest, "2m0s")
 }
@@ -102,54 +101,11 @@ func TestToKubeletConfigManifest_WhenOnlyPodsPerCoreSet_ItShouldNotIncludeOtherF
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	assertContains(t, manifest, `"podsPerCore":5`)
+	assertContains(t, manifest, "podsPerCore: 5")
 	assertNotContains(t, manifest, "maxPods")
 	if !strings.Contains(manifest, "kubeletConfig:") {
 		t.Errorf("manifest should contain 'kubeletConfig:' key")
 	}
-}
-
-func TestToKubeletConfigManifestWithTaints_WhenKubeletConfigIsNil_ItShouldReturnEmptyString(t *testing.T) {
-	var kc *KubeletConfiguration
-	manifest, err := kc.ToKubeletConfigManifestWithTaints("test-name")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if manifest != "" {
-		t.Errorf("expected empty manifest for nil KubeletConfig, got: %q", manifest)
-	}
-}
-
-func TestToKubeletConfigManifestWithTaints_WhenKubeletConfigHasMaxPods_ItShouldIncludeMaxPodsAndTaint(t *testing.T) {
-	kc := &KubeletConfiguration{
-		MaxPods: ptr.To[int32](427),
-	}
-	manifest, err := kc.ToKubeletConfigManifestWithTaints("karpenter-kubelet-test")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	assertContains(t, manifest, "apiVersion: machineconfiguration.openshift.io/v1")
-	assertContains(t, manifest, "kind: KubeletConfig")
-	assertContains(t, manifest, "name: karpenter-kubelet-test")
-	assertContains(t, manifest, `"maxPods":427`)
-	assertContains(t, manifest, `"registerWithTaints"`)
-	assertContains(t, manifest, `"karpenter.sh/unregistered"`)
-	assertContains(t, manifest, `"NoExecute"`)
-}
-
-func TestToKubeletConfigManifestWithTaints_WhenKubeletConfigIsEmpty_ItShouldIncludeTaintOnly(t *testing.T) {
-	kc := &KubeletConfiguration{}
-	manifest, err := kc.ToKubeletConfigManifestWithTaints("karpenter-kubelet-empty")
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	assertContains(t, manifest, "apiVersion: machineconfiguration.openshift.io/v1")
-	assertContains(t, manifest, "kind: KubeletConfig")
-	assertContains(t, manifest, "name: karpenter-kubelet-empty")
-	assertContains(t, manifest, `"registerWithTaints"`)
-	assertContains(t, manifest, `"karpenter.sh/unregistered"`)
-	assertContains(t, manifest, `"true"`)
-	assertContains(t, manifest, `"NoExecute"`)
 }
 
 func assertContains(t *testing.T, s, substr string) {

@@ -11,6 +11,7 @@ import (
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	"github.com/openshift/hypershift/support/releaseinfo/testutils"
+	"github.com/openshift/hypershift/support/upsert"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -300,4 +301,66 @@ func TestKarpenterDeletion(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcileTaintConfigMap(t *testing.T) {
+	scheme := api.Scheme
+	namespace := "clusters-test"
+
+	hcp := &hyperv1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-hcp",
+			Namespace: namespace,
+		},
+	}
+
+	t.Run("When taint ConfigMap does not exist it should create it", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := log.IntoContext(t.Context(), testr.New(t))
+
+		fakeManagementClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		r := &Reconciler{
+			ManagementClient:       fakeManagementClient,
+			CreateOrUpdateProvider: upsert.New(false),
+		}
+
+		err := r.reconcileTaintConfigMap(ctx, hcp)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		cm := &corev1.ConfigMap{}
+		err = fakeManagementClient.Get(ctx, client.ObjectKey{Name: karpenterutil.KarpenterTaintConfigMapName, Namespace: namespace}, cm)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(cm.Data).To(HaveKey("config"))
+		g.Expect(cm.Data["config"]).To(ContainSubstring("registerWithTaints"))
+		g.Expect(cm.Data["config"]).To(ContainSubstring(karpenterutil.KarpenterTaintKey))
+		g.Expect(cm.Data["config"]).To(ContainSubstring(karpenterutil.KarpenterTaintValue))
+		g.Expect(cm.Data["config"]).To(ContainSubstring(karpenterutil.KarpenterTaintEffect))
+	})
+
+	t.Run("When taint ConfigMap already exists it should be idempotent", func(t *testing.T) {
+		g := NewWithT(t)
+		ctx := log.IntoContext(t.Context(), testr.New(t))
+
+		existingCM := &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      karpenterutil.KarpenterTaintConfigMapName,
+				Namespace: namespace,
+			},
+			Data: map[string]string{"config": "old-data"},
+		}
+		fakeManagementClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(existingCM).Build()
+		r := &Reconciler{
+			ManagementClient:       fakeManagementClient,
+			CreateOrUpdateProvider: upsert.New(false),
+		}
+
+		err := r.reconcileTaintConfigMap(ctx, hcp)
+		g.Expect(err).NotTo(HaveOccurred())
+
+		cm := &corev1.ConfigMap{}
+		err = fakeManagementClient.Get(ctx, client.ObjectKey{Name: karpenterutil.KarpenterTaintConfigMapName, Namespace: namespace}, cm)
+		g.Expect(err).NotTo(HaveOccurred())
+		g.Expect(cm.Data["config"]).To(ContainSubstring("registerWithTaints"))
+		g.Expect(cm.Data["config"]).To(ContainSubstring(karpenterutil.KarpenterTaintKey))
+	})
 }

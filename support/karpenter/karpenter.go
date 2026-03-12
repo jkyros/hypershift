@@ -23,6 +23,33 @@ const (
 // KarpenterTaintConfigMapName is the name of the configmap containing the karpenter taint config
 const KarpenterTaintConfigMapName = "set-karpenter-taint"
 
+const (
+	// KarpenterTaintKey is the taint key applied to nodes registered by Karpenter.
+	KarpenterTaintKey = "karpenter.sh/unregistered"
+	// KarpenterTaintValue is the taint value applied to nodes registered by Karpenter.
+	KarpenterTaintValue = "true"
+	// KarpenterTaintEffect is the taint effect applied to nodes registered by Karpenter.
+	KarpenterTaintEffect = "NoExecute"
+)
+
+// KarpenterTaintConfigManifest returns the KubeletConfig CR YAML for the set-karpenter-taint ConfigMap.
+func KarpenterTaintConfigManifest() string {
+	return fmt.Sprintf(`apiVersion: machineconfiguration.openshift.io/v1
+kind: KubeletConfig
+metadata:
+  name: %s
+spec:
+  kubeletConfig:
+    registerWithTaints:
+      - key: %q
+        value: %q
+        effect: %q`,
+		KarpenterTaintConfigMapName,
+		KarpenterTaintKey,
+		KarpenterTaintValue,
+		KarpenterTaintEffect)
+}
+
 // KarpenterNodeClassKubeletConfigName returns the name of the ConfigMap containing the
 // per-OpenshiftEC2NodeClass KubeletConfig in the HCP namespace.
 func KarpenterNodeClassKubeletConfigName(nodeClassName string) string {

@@ -2,8 +2,10 @@ package karpenterignition
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
@@ -35,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"sigs.k8s.io/controller-runtime/pkg/source"
+	"sigs.k8s.io/yaml"
 
 	"github.com/blang/semver"
 )
@@ -496,10 +499,30 @@ func (r *KarpenterIgnitionReconciler) reconcileKubeletConfigMap(
 		return nil
 	}
 
-	// Use ToKubeletConfigManifestWithTaints so the karpenter.sh/unregistered taint is merged
-	// into this manifest. This replaces the separate set-karpenter-taint ConfigMap entry so
-	// only one KubeletConfig targets the worker MachineConfigPool in the ignition payload.
-	manifest, err := openshiftEC2NodeClass.Spec.Kubelet.ToKubeletConfigManifestWithTaints(configMapName)
+	taintBase := map[string]interface{}{
+		"registerWithTaints": []interface{}{
+			map[string]interface{}{
+				"key":    karpenterutil.KarpenterTaintKey,
+				"value":  karpenterutil.KarpenterTaintValue,
+				"effect": karpenterutil.KarpenterTaintEffect,
+			},
+		},
+	}
+
+	// Convert user KubeletConfiguration to a plain map (via JSON round-trip to honor json tags
+	// and omitempty), then shallow-merge with the taint base. User keys win on conflict, but
+	// registerWithTaints is never a user-settable field so the merge is always purely additive.
+	userRaw, err := json.Marshal(openshiftEC2NodeClass.Spec.Kubelet)
+	if err != nil {
+		return fmt.Errorf("failed to marshal user kubelet config: %w", err)
+	}
+	var userMap map[string]interface{}
+	if err := json.Unmarshal(userRaw, &userMap); err != nil {
+		return fmt.Errorf("failed to unmarshal user kubelet config: %w", err)
+	}
+
+	merged := mergeKubeletConfigMaps(taintBase, userMap)
+	manifest, err := kubeletConfigManifest(configMapName, merged)
 	if err != nil {
 		return fmt.Errorf("failed to generate kubelet config manifest: %w", err)
 	}
@@ -515,6 +538,35 @@ func (r *KarpenterIgnitionReconciler) reconcileKubeletConfigMap(
 		return nil
 	})
 	return err
+}
+
+// mergeKubeletConfigMaps merges two kubeletConfig maps. Base keys are included unless
+// overlay defines the same key, in which case overlay wins.
+func mergeKubeletConfigMaps(base, overlay map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{}, len(base)+len(overlay))
+	for k, v := range base {
+		result[k] = v
+	}
+	for k, v := range overlay {
+		result[k] = v
+	}
+	return result
+}
+
+// kubeletConfigManifest serializes a pre-merged kubeletConfig map into a KubeletConfig CR YAML
+// string suitable for storage in a ConfigMap "config" key.
+func kubeletConfigManifest(name string, kubeletConfig map[string]interface{}) (string, error) {
+	cr := map[string]interface{}{
+		"apiVersion": "machineconfiguration.openshift.io/v1",
+		"kind":       "KubeletConfig",
+		"metadata":   map[string]interface{}{"name": name},
+		"spec":       map[string]interface{}{"kubeletConfig": kubeletConfig},
+	}
+	out, err := yaml.Marshal(cr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(string(out), "\n"), nil
 }
 
 // buildConfigGenerator creates a ConfigGenerator for the in-memory NodePool

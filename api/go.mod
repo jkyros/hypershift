@@ -8,6 +8,7 @@ require (
 	k8s.io/api v0.34.3
 	k8s.io/apimachinery v0.34.3
 	k8s.io/utils v0.0.0-20260108192941-914a6e750570
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -87,7 +88,6 @@ require (
 	sigs.k8s.io/karpenter v1.8.2 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
 // Use our openshift version of karpenter instead of upstream

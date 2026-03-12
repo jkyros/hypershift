@@ -2,7 +2,9 @@ package v1beta1
 
 import (
 	"encoding/json"
-	"fmt"
+	"strings"
+
+	"sigs.k8s.io/yaml"
 )
 
 // ToKubeletConfigManifest converts the KubeletConfiguration spec into a KubeletConfig
@@ -14,56 +16,27 @@ func (kc *KubeletConfiguration) ToKubeletConfigManifest(name string) (string, er
 		return "", nil
 	}
 
-	// Marshal the KubeletConfig struct directly — the JSON tags and omitempty on each field
-	// handle nil/empty filtering, and metav1.Duration marshals as a duration string automatically.
-	// This mirrors how upstream Karpenter serializes KubeletConfiguration in nodeadm.go.
-	kubeletConfigJSON, err := json.Marshal(kc)
-	if err != nil {
-		return "", err
-	}
-
-	return fmt.Sprintf(`apiVersion: machineconfiguration.openshift.io/v1
-kind: KubeletConfig
-metadata:
-  name: %s
-spec:
-  kubeletConfig: %s`, name, string(kubeletConfigJSON)), nil
-}
-
-// ToKubeletConfigManifestWithTaints is like ToKubeletConfigManifest but also injects
-// the karpenter.sh/unregistered taint into registerWithTaints. Use this instead of
-// ToKubeletConfigManifest when the set-karpenter-taint ConfigMap is being omitted from
-// the NodePool configRefs (i.e. when Spec.Kubelet != nil), so that only a single
-// KubeletConfig targets the worker MachineConfigPool in the ignition payload.
-func (kc *KubeletConfiguration) ToKubeletConfigManifestWithTaints(name string) (string, error) {
-	if kc == nil {
-		return "", nil
-	}
-
+	// Marshal via JSON first (respects json tags and omitempty), then convert to a
+	// map so the full CR can be serialised as clean YAML by sigs.k8s.io/yaml.
 	raw, err := json.Marshal(kc)
 	if err != nil {
 		return "", err
 	}
-	var m map[string]interface{}
-	if err := json.Unmarshal(raw, &m); err != nil {
-		return "", err
-	}
-	m["registerWithTaints"] = []interface{}{
-		map[string]interface{}{
-			"key":    "karpenter.sh/unregistered",
-			"value":  "true",
-			"effect": "NoExecute",
-		},
-	}
-	merged, err := json.Marshal(m)
-	if err != nil {
+	var kubeletConfigMap map[string]interface{}
+	if err := json.Unmarshal(raw, &kubeletConfigMap); err != nil {
 		return "", err
 	}
 
-	return fmt.Sprintf(`apiVersion: machineconfiguration.openshift.io/v1
-kind: KubeletConfig
-metadata:
-  name: %s
-spec:
-  kubeletConfig: %s`, name, string(merged)), nil
+	cr := map[string]interface{}{
+		"apiVersion": "machineconfiguration.openshift.io/v1",
+		"kind":       "KubeletConfig",
+		"metadata":   map[string]interface{}{"name": name},
+		"spec":       map[string]interface{}{"kubeletConfig": kubeletConfigMap},
+	}
+
+	out, err := yaml.Marshal(cr)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSuffix(string(out), "\n"), nil
 }
