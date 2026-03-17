@@ -54,6 +54,23 @@ const (
 	// ConditionReasonAsExpected indicates that the version skew is within the
 	// supported policy.
 	ConditionReasonAsExpected = "AsExpected"
+
+	// ConditionTypeAWSPrivateLinkSubnetsAccepted indicates whether the subnets
+	// resolved for this nodeclass were successfully accepted by the AWS private
+	// link endpoint service controller.
+	ConditionTypeAWSPrivateLinkSubnetsAccepted = "AWSPrivateLinkSubnetsAccepted"
+
+	// ConditionReasonSubnetsAccepted is set when all resolved subnets have been
+	// accepted into the private link endpoint service.
+	ConditionReasonSubnetsAccepted = "SubnetsAccepted"
+
+	// ConditionReasonSubnetsNotAccepted is set when the private link endpoint
+	// service did not successfully accept the subnets.
+	ConditionReasonSubnetsNotAccepted = "SubnetsNotAccepted"
+
+	// ConditionReasonNoSubnetsResolved is set when the nodeclass has no resolved
+	// subnets in status yet.
+	ConditionReasonNoSubnetsResolved = "NoSubnetsResolved"
 )
 
 // Subnet contains resolved Subnet selector values utilized for node launch

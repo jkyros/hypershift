@@ -2,9 +2,9 @@ package aws
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +12,7 @@ import (
 	awsutil "github.com/openshift/hypershift/cmd/infra/aws/util"
 	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	"github.com/openshift/hypershift/support/awsapi"
+	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/upsert"
 	supportutil "github.com/openshift/hypershift/support/util"
 
@@ -25,6 +26,7 @@ import (
 	"github.com/aws/aws-sdk-go/aws/arn"
 	"github.com/aws/smithy-go"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
@@ -97,6 +99,10 @@ func (r *AWSEndpointServiceReconciler) SetupWithManager(mgr ctrl.Manager) error 
 			DeleteFunc: r.enqueueOnNodePoolDelete(mgr),
 		}).
 		Watches(&hyperv1.HostedCluster{}, handler.Funcs{UpdateFunc: r.enqueueOnHostedClusterChange(mgr)}).
+		Watches(&corev1.ConfigMap{}, handler.Funcs{
+			CreateFunc: r.enqueueOnKarpenterConfigMapCreate(mgr),
+			UpdateFunc: r.enqueueOnKarpenterConfigMapChange(mgr),
+		}).
 		WithOptions(controller.Options{
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](3*time.Second, 30*time.Second),
 			MaxConcurrentReconciles: 10,
@@ -190,6 +196,49 @@ func (r *AWSEndpointServiceReconciler) enqueueOnHostedClusterChange(mgr ctrl.Man
 			for _, req := range awsEndpointServicesByName(fmt.Sprintf("%s-%s", newHC.Namespace, newHC.Name)) {
 				q.Add(req)
 			}
+		}
+	}
+}
+
+func (r *AWSEndpointServiceReconciler) enqueueOnKarpenterConfigMapCreate(mgr ctrl.Manager) func(context.Context, event.CreateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	return func(ctx context.Context, e event.CreateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+		cm, ok := e.Object.(*corev1.ConfigMap)
+		if !ok {
+			return
+		}
+		if cm.Name != karpenterutil.KarpenterSubnetsConfigMapName {
+			return
+		}
+		if cm.Labels[karpenterutil.ManagedByKarpenterLabel] != "true" {
+			return
+		}
+		for _, req := range awsEndpointServicesByName(cm.Namespace) {
+			q.Add(req)
+		}
+	}
+}
+
+func (r *AWSEndpointServiceReconciler) enqueueOnKarpenterConfigMapChange(mgr ctrl.Manager) func(context.Context, event.UpdateEvent, workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+	return func(ctx context.Context, e event.UpdateEvent, q workqueue.TypedRateLimitingInterface[reconcile.Request]) {
+		newCM, ok := e.ObjectNew.(*corev1.ConfigMap)
+		if !ok {
+			return
+		}
+		if newCM.Name != karpenterutil.KarpenterSubnetsConfigMapName {
+			return
+		}
+		if newCM.Labels[karpenterutil.ManagedByKarpenterLabel] != "true" {
+			return
+		}
+		oldCM, ok := e.ObjectOld.(*corev1.ConfigMap)
+		if !ok {
+			return
+		}
+		if newCM.Data["subnetIDs"] == oldCM.Data["subnetIDs"] {
+			return
+		}
+		for _, req := range awsEndpointServicesByName(newCM.Namespace) {
+			q.Add(req)
 		}
 	}
 }
@@ -322,7 +371,7 @@ func reconcileAWSEndpointService(ctx context.Context, c client.Client, awsEndpoi
 }
 
 func reconcileAWSEndpointServiceSubnetIDs(ctx context.Context, c client.Client, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
-	subnetIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace)
+	subnetIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace, awsEndpointService.Namespace)
 	if err != nil {
 		return fmt.Errorf("failed to list subnetIDs: %w", err)
 	}
@@ -344,19 +393,48 @@ func listNodePools(ctx context.Context, c client.Client, nodePoolNamespace strin
 	return filtered, nil
 }
 
-func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNamespace string) ([]string, error) {
+func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNamespace, hcpNamespace string) ([]string, error) {
 	nodePools, err := listNodePools(ctx, c, nodePoolNamespace, clusterName)
 	if err != nil {
 		return nil, err
 	}
-	subnetIDs := []string{}
+	subnetIDSet := sets.NewString()
 	for _, nodePool := range nodePools {
 		if nodePool.Spec.Platform.AWS != nil &&
 			nodePool.Spec.Platform.AWS.Subnet.ID != nil {
-			subnetIDs = append(subnetIDs, *nodePool.Spec.Platform.AWS.Subnet.ID)
+			subnetIDSet.Insert(*nodePool.Spec.Platform.AWS.Subnet.ID)
 		}
 	}
-	sort.Strings(subnetIDs)
+
+	karpenterSubnets, err := listKarpenterSubnetIDs(ctx, c, hcpNamespace)
+	if err != nil {
+		ctrl.LoggerFrom(ctx).V(4).Info("Failed to get Karpenter subnets, using NodePool subnets only", "error", err)
+	} else {
+		subnetIDSet.Insert(karpenterSubnets...)
+	}
+
+	return subnetIDSet.List(), nil
+}
+
+// listKarpenterSubnetIDs reads the karpenter-subnets ConfigMap from the HCP namespace
+// and returns the subnet IDs aggregated by the EC2NodeClass controller.
+func listKarpenterSubnetIDs(ctx context.Context, c client.Client, namespace string) ([]string, error) {
+	configMap := &corev1.ConfigMap{}
+	err := c.Get(ctx, client.ObjectKey{Namespace: namespace, Name: karpenterutil.KarpenterSubnetsConfigMapName}, configMap)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return []string{}, nil
+		}
+		return nil, fmt.Errorf("failed to get karpenter subnets configmap: %w", err)
+	}
+	subnetIDsJSON := configMap.Data["subnetIDs"]
+	if subnetIDsJSON == "" {
+		return []string{}, nil
+	}
+	var subnetIDs []string
+	if err := json.Unmarshal([]byte(subnetIDsJSON), &subnetIDs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal subnet IDs: %w", err)
+	}
 	return subnetIDs, nil
 }
 

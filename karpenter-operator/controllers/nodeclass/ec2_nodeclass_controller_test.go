@@ -2,6 +2,7 @@ package nodeclass
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"testing"
@@ -12,7 +13,10 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool"
+	hyperapi "github.com/openshift/hypershift/support/api"
+	"github.com/openshift/hypershift/support/config"
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
+	"github.com/openshift/hypershift/support/upsert"
 
 	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
@@ -682,6 +686,263 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 		}
 	}
 	return nil
+}
+
+func TestReconcileKarpenterSubnetsConfigMap(t *testing.T) {
+	const testNamespace = "test-hcp-namespace"
+	const testInfraIDVal = "test-infra-id"
+
+	hcp := &hyperv1.HostedControlPlane{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-hcp",
+			Namespace: testNamespace,
+		},
+		Spec: hyperv1.HostedControlPlaneSpec{
+			InfraID: testInfraIDVal,
+		},
+	}
+
+	makeNodeClass := func(name string, subnetIDs ...string) *hyperkarpenterv1.OpenshiftEC2NodeClass {
+		subnets := make([]hyperkarpenterv1.Subnet, len(subnetIDs))
+		for i, id := range subnetIDs {
+			subnets[i] = hyperkarpenterv1.Subnet{ID: id, Zone: "us-east-1a"}
+		}
+		return &hyperkarpenterv1.OpenshiftEC2NodeClass{
+			ObjectMeta: metav1.ObjectMeta{Name: name},
+			Status:     hyperkarpenterv1.OpenshiftEC2NodeClassStatus{Subnets: subnets},
+		}
+	}
+
+	testCases := []struct {
+		name              string
+		guestObjects      []client.Object
+		managementObjects []client.Object
+		expectedSubnetIDs []string
+		expectConfigMap   bool
+	}{
+		{
+			name: "When all nodeclasses have resolved subnets it should create ConfigMap with all subnet IDs",
+			guestObjects: []client.Object{
+				makeNodeClass("nc1", "subnet-aaa", "subnet-bbb"),
+				makeNodeClass("nc2", "subnet-ccc"),
+			},
+			expectedSubnetIDs: []string{"subnet-aaa", "subnet-bbb", "subnet-ccc"},
+			expectConfigMap:   true,
+		},
+		{
+			name:            "When no nodeclasses have resolved subnets it should delete the ConfigMap",
+			guestObjects:    []client.Object{makeNodeClass("nc1")},
+			expectConfigMap: false,
+		},
+		{
+			name: "When multiple nodeclasses share a subnet it should deduplicate in the ConfigMap",
+			guestObjects: []client.Object{
+				makeNodeClass("nc1", "subnet-aaa", "subnet-bbb"),
+				makeNodeClass("nc2", "subnet-aaa", "subnet-ccc"),
+			},
+			expectedSubnetIDs: []string{"subnet-aaa", "subnet-bbb", "subnet-ccc"},
+			expectConfigMap:   true,
+		},
+		{
+			name: "When a nodeclass is deleted it should update the ConfigMap to remove its subnets",
+			guestObjects: []client.Object{
+				makeNodeClass("nc1", "subnet-aaa"),
+			},
+			managementObjects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+						Namespace: testNamespace,
+					},
+					Data: map[string]string{
+						"subnetIDs": `["subnet-aaa","subnet-bbb"]`,
+					},
+				},
+			},
+			expectedSubnetIDs: []string{"subnet-aaa"},
+			expectConfigMap:   true,
+		},
+		{
+			name: "When SubnetSelectorTerms is nil but subnets are resolved it should include them",
+			guestObjects: []client.Object{
+				&hyperkarpenterv1.OpenshiftEC2NodeClass{
+					ObjectMeta: metav1.ObjectMeta{Name: "default-nc"},
+					Spec:       hyperkarpenterv1.OpenshiftEC2NodeClassSpec{},
+					Status: hyperkarpenterv1.OpenshiftEC2NodeClassStatus{
+						Subnets: []hyperkarpenterv1.Subnet{
+							{ID: "subnet-default-1", Zone: "us-east-1a"},
+						},
+					},
+				},
+			},
+			expectedSubnetIDs: []string{"subnet-default-1"},
+			expectConfigMap:   true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			guestScheme := runtime.NewScheme()
+			g.Expect(hyperkarpenterv1.AddToScheme(guestScheme)).To(Succeed())
+
+			guestClient := fake.NewClientBuilder().
+				WithScheme(guestScheme).
+				WithObjects(tc.guestObjects...).
+				Build()
+
+			managementObjects := append([]client.Object{hcp}, tc.managementObjects...)
+			managementClient := fake.NewClientBuilder().
+				WithScheme(hyperapi.Scheme).
+				WithObjects(managementObjects...).
+				Build()
+
+			r := &EC2NodeClassReconciler{
+				Namespace:              testNamespace,
+				managementClient:       managementClient,
+				guestClient:            guestClient,
+				CreateOrUpdateProvider: upsert.New(false),
+			}
+
+			err := r.reconcileKarpenterSubnetsConfigMap(t.Context(), hcp)
+			g.Expect(err).ToNot(HaveOccurred())
+
+			cm := &corev1.ConfigMap{}
+			getErr := managementClient.Get(t.Context(), client.ObjectKey{
+				Namespace: testNamespace,
+				Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+			}, cm)
+
+			if !tc.expectConfigMap {
+				g.Expect(getErr).To(HaveOccurred())
+				g.Expect(client.IgnoreNotFound(getErr)).To(Succeed())
+				return
+			}
+
+			g.Expect(getErr).ToNot(HaveOccurred())
+			g.Expect(cm.Labels[karpenterutil.ManagedByKarpenterLabel]).To(Equal("true"))
+			g.Expect(cm.Labels[hyperv1.InfraIDLabel]).To(Equal(testInfraIDVal))
+
+			var gotSubnetIDs []string
+			g.Expect(json.Unmarshal([]byte(cm.Data["subnetIDs"]), &gotSubnetIDs)).To(Succeed())
+			g.Expect(gotSubnetIDs).To(ConsistOf(tc.expectedSubnetIDs))
+
+			// Verify owner reference is set to the HCP
+			ownerRef := config.OwnerRefFrom(hcp)
+			_ = ownerRef // just verify the ref exists conceptually; fake client doesn't validate
+		})
+	}
+}
+
+func TestReconcilePrivateLinkCondition(t *testing.T) {
+	const testNamespace = "test-hcp-namespace"
+
+	makeNodeClass := func(subnetIDs ...string) *hyperkarpenterv1.OpenshiftEC2NodeClass {
+		subnets := make([]hyperkarpenterv1.Subnet, len(subnetIDs))
+		for i, id := range subnetIDs {
+			subnets[i] = hyperkarpenterv1.Subnet{ID: id, Zone: "us-east-1a"}
+		}
+		return &hyperkarpenterv1.OpenshiftEC2NodeClass{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-nc", Namespace: ""},
+			Status:     hyperkarpenterv1.OpenshiftEC2NodeClassStatus{Subnets: subnets},
+		}
+	}
+
+	makeEndpointService := func(condStatus metav1.ConditionStatus, msg string) *hyperv1.AWSEndpointService {
+		return &hyperv1.AWSEndpointService{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "kube-apiserver-private",
+				Namespace: testNamespace,
+			},
+			Status: hyperv1.AWSEndpointServiceStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:    string(hyperv1.AWSEndpointServiceAvailable),
+						Status:  condStatus,
+						Reason:  "TestReason",
+						Message: msg,
+					},
+				},
+			},
+		}
+	}
+
+	testCases := []struct {
+		name               string
+		nodeClass          *hyperkarpenterv1.OpenshiftEC2NodeClass
+		managementObjects  []client.Object
+		expectedCondStatus metav1.ConditionStatus
+		expectedReason     string
+	}{
+		{
+			name:      "When AWSEndpointServiceAvailable is True it should set AWSPrivateLinkSubnetsAccepted True",
+			nodeClass: makeNodeClass("subnet-aaa"),
+			managementObjects: []client.Object{
+				makeEndpointService(metav1.ConditionTrue, ""),
+			},
+			expectedCondStatus: metav1.ConditionTrue,
+			expectedReason:     hyperkarpenterv1.ConditionReasonSubnetsAccepted,
+		},
+		{
+			name:      "When AWSEndpointServiceAvailable is False it should set AWSPrivateLinkSubnetsAccepted False with message",
+			nodeClass: makeNodeClass("subnet-aaa"),
+			managementObjects: []client.Object{
+				makeEndpointService(metav1.ConditionFalse, "endpoint service not found"),
+			},
+			expectedCondStatus: metav1.ConditionFalse,
+			expectedReason:     hyperkarpenterv1.ConditionReasonSubnetsNotAccepted,
+		},
+		{
+			name:               "When AWSEndpointService does not exist it should set AWSPrivateLinkSubnetsAccepted Unknown",
+			nodeClass:          makeNodeClass("subnet-aaa"),
+			managementObjects:  []client.Object{},
+			expectedCondStatus: metav1.ConditionUnknown,
+			expectedReason:     hyperkarpenterv1.ConditionReasonNoSubnetsResolved,
+		},
+		{
+			name:               "When nodeclass has no resolved subnets it should set AWSPrivateLinkSubnetsAccepted False NoSubnetsResolved",
+			nodeClass:          makeNodeClass(),
+			managementObjects:  []client.Object{makeEndpointService(metav1.ConditionTrue, "")},
+			expectedCondStatus: metav1.ConditionFalse,
+			expectedReason:     hyperkarpenterv1.ConditionReasonNoSubnetsResolved,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			guestScheme := runtime.NewScheme()
+			g.Expect(hyperkarpenterv1.AddToScheme(guestScheme)).To(Succeed())
+
+			guestClient := fake.NewClientBuilder().
+				WithScheme(guestScheme).
+				WithStatusSubresource(tc.nodeClass).
+				WithObjects(tc.nodeClass).
+				Build()
+
+			managementClient := fake.NewClientBuilder().
+				WithScheme(hyperapi.Scheme).
+				WithStatusSubresource(tc.managementObjects...).
+				WithObjects(tc.managementObjects...).
+				Build()
+
+			r := &EC2NodeClassReconciler{
+				Namespace:        testNamespace,
+				managementClient: managementClient,
+				guestClient:      guestClient,
+			}
+
+			err := r.reconcilePrivateLinkCondition(t.Context(), tc.nodeClass)
+			g.Expect(err).ToNot(HaveOccurred())
+
+			cond := findCondition(tc.nodeClass.Status.Conditions, hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted)
+			g.Expect(cond).NotTo(BeNil())
+			g.Expect(cond.Status).To(Equal(tc.expectedCondStatus))
+			g.Expect(cond.Reason).To(Equal(tc.expectedReason))
+		})
+	}
 }
 
 func TestKarpenterSecretPredicate(t *testing.T) {

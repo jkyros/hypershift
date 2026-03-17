@@ -19,6 +19,10 @@ const (
 // KarpenterTaintConfigMapName is the name of the configmap containing the karpenter taint config
 const KarpenterTaintConfigMapName = "set-karpenter-taint"
 
+// KarpenterSubnetsConfigMapName is the name of the ConfigMap containing
+// aggregated subnet IDs from all OpenshiftEC2NodeClass resources.
+const KarpenterSubnetsConfigMapName = "karpenter-subnets"
+
 // ErrHCPNotFound is returned when no HostedControlPlane is found in the namespace.
 var ErrHCPNotFound = errors.New("hostedcontrolplane not found")
 

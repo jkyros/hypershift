@@ -2,6 +2,7 @@ package nodeclass
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -9,6 +10,7 @@ import (
 
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
+	"github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/manifests"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool"
 	"github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
 	supportassets "github.com/openshift/hypershift/support/assets"
@@ -29,6 +31,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	utilerrors "k8s.io/apimachinery/pkg/util/errors"
+	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/utils/ptr"
 
@@ -156,6 +159,10 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 			return ctrl.Result{RequeueAfter: time.Second * 5}, nil
 		}
 
+		if err := r.reconcileKarpenterSubnetsConfigMap(ctx, hcp); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to reconcile karpenter subnets configmap during deletion: %w", err)
+		}
+
 		if controllerutil.ContainsFinalizer(openshiftEC2NodeClass, finalizer) {
 			original := openshiftEC2NodeClass.DeepCopy()
 			controllerutil.RemoveFinalizer(openshiftEC2NodeClass, finalizer)
@@ -193,6 +200,14 @@ func (r *EC2NodeClassReconciler) Reconcile(ctx context.Context, req ctrl.Request
 
 	if err := r.reconcileStatus(ctx, ec2NodeClass, openshiftEC2NodeClass); err != nil {
 		return ctrl.Result{}, err
+	}
+
+	if err := r.reconcileKarpenterSubnetsConfigMap(ctx, hcp); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile karpenter subnets configmap: %w", err)
+	}
+
+	if err := r.reconcilePrivateLinkCondition(ctx, openshiftEC2NodeClass); err != nil {
+		return ctrl.Result{}, fmt.Errorf("failed to reconcile private link condition: %w", err)
 	}
 
 	if err := r.reconcileVAP(ctx); err != nil {
@@ -406,6 +421,142 @@ func (r *EC2NodeClassReconciler) computeReadyCondition(openshiftNodeClass *hyper
 			Message:            message,
 		})
 	}
+}
+
+// reconcileKarpenterSubnetsConfigMap aggregates subnet IDs from all OpenshiftEC2NodeClass
+// status fields and writes them to a ConfigMap in the management cluster HCP namespace.
+// The AWS private link controller watches this ConfigMap to include Karpenter-resolved
+// subnets in the endpoint service's allowed subnet list.
+func (r *EC2NodeClassReconciler) reconcileKarpenterSubnetsConfigMap(ctx context.Context, hcp *hyperv1.HostedControlPlane) error {
+	nodeClassList := &hyperkarpenterv1.OpenshiftEC2NodeClassList{}
+	if err := r.guestClient.List(ctx, nodeClassList); err != nil {
+		return fmt.Errorf("failed to list OpenshiftEC2NodeClasses: %w", err)
+	}
+
+	subnetIDSet := sets.NewString()
+	for _, nodeClass := range nodeClassList.Items {
+		for _, subnet := range nodeClass.Status.Subnets {
+			subnetIDSet.Insert(subnet.ID)
+		}
+	}
+
+	cm := &corev1.ConfigMap{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+			Namespace: r.Namespace,
+		},
+	}
+
+	if subnetIDSet.Len() == 0 {
+		if err := r.managementClient.Delete(ctx, cm); err != nil && !apierrors.IsNotFound(err) {
+			return fmt.Errorf("failed to delete karpenter subnets configmap: %w", err)
+		}
+		return nil
+	}
+
+	subnetIDs := subnetIDSet.List()
+	subnetIDsJSON, err := json.Marshal(subnetIDs)
+	if err != nil {
+		return fmt.Errorf("failed to marshal subnet IDs: %w", err)
+	}
+
+	ownerRef := config.OwnerRefFrom(hcp)
+	if _, err := r.CreateOrUpdate(ctx, r.managementClient, cm, func() error {
+		ownerRef.ApplyTo(cm)
+		if cm.Labels == nil {
+			cm.Labels = map[string]string{}
+		}
+		cm.Labels[hyperv1.InfraIDLabel] = hcp.Spec.InfraID
+		cm.Labels[karpenterutil.ManagedByKarpenterLabel] = "true"
+		if cm.Data == nil {
+			cm.Data = map[string]string{}
+		}
+		cm.Data["subnetIDs"] = string(subnetIDsJSON)
+		return nil
+	}); err != nil {
+		return fmt.Errorf("failed to upsert karpenter subnets configmap: %w", err)
+	}
+
+	return nil
+}
+
+// reconcilePrivateLinkCondition reads the kube-apiserver-private AWSEndpointService
+// and maps its AWSEndpointServiceAvailable condition to the AWSPrivateLinkSubnetsAccepted
+// condition on the OpenshiftEC2NodeClass.
+func (r *EC2NodeClassReconciler) reconcilePrivateLinkCondition(ctx context.Context, openshiftNodeClass *hyperkarpenterv1.OpenshiftEC2NodeClass) error {
+	originalObj := openshiftNodeClass.DeepCopy()
+
+	if len(openshiftNodeClass.Status.Subnets) == 0 {
+		meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition{
+			Type:               hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+			Status:             metav1.ConditionFalse,
+			Reason:             hyperkarpenterv1.ConditionReasonNoSubnetsResolved,
+			Message:            "No subnets resolved for this nodeclass yet",
+			ObservedGeneration: openshiftNodeClass.Generation,
+		})
+		if err := r.guestClient.Status().Patch(ctx, openshiftNodeClass, client.MergeFrom(originalObj)); err != nil {
+			return fmt.Errorf("failed to patch AWSPrivateLinkSubnetsAccepted condition: %w", err)
+		}
+		return nil
+	}
+
+	endpointService := &hyperv1.AWSEndpointService{}
+	err := r.managementClient.Get(ctx, client.ObjectKey{
+		Namespace: r.Namespace,
+		Name:      manifests.KubeAPIServerPrivateServiceName,
+	}, endpointService)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition{
+				Type:               hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+				Status:             metav1.ConditionUnknown,
+				Reason:             hyperkarpenterv1.ConditionReasonNoSubnetsResolved,
+				Message:            "AWSEndpointService kube-apiserver-private not found; cluster may not be private",
+				ObservedGeneration: openshiftNodeClass.Generation,
+			})
+			if err := r.guestClient.Status().Patch(ctx, openshiftNodeClass, client.MergeFrom(originalObj)); err != nil {
+				return fmt.Errorf("failed to patch AWSPrivateLinkSubnetsAccepted condition: %w", err)
+			}
+			return nil
+		}
+		return fmt.Errorf("failed to get kube-apiserver-private AWSEndpointService: %w", err)
+	}
+
+	epAvailable := meta.FindStatusCondition(endpointService.Status.Conditions, string(hyperv1.AWSEndpointServiceAvailable))
+
+	var newCondition metav1.Condition
+	switch {
+	case epAvailable == nil:
+		newCondition = metav1.Condition{
+			Type:               hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+			Status:             metav1.ConditionUnknown,
+			Reason:             hyperkarpenterv1.ConditionReasonNoSubnetsResolved,
+			Message:            "AWSEndpointService availability not yet determined",
+			ObservedGeneration: openshiftNodeClass.Generation,
+		}
+	case epAvailable.Status == metav1.ConditionTrue:
+		newCondition = metav1.Condition{
+			Type:               hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+			Status:             metav1.ConditionTrue,
+			Reason:             hyperkarpenterv1.ConditionReasonSubnetsAccepted,
+			Message:            "Subnets accepted by the private link endpoint service",
+			ObservedGeneration: openshiftNodeClass.Generation,
+		}
+	default:
+		newCondition = metav1.Condition{
+			Type:               hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+			Status:             metav1.ConditionFalse,
+			Reason:             hyperkarpenterv1.ConditionReasonSubnetsNotAccepted,
+			Message:            epAvailable.Message,
+			ObservedGeneration: openshiftNodeClass.Generation,
+		}
+	}
+
+	meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, newCondition)
+	if err := r.guestClient.Status().Patch(ctx, openshiftNodeClass, client.MergeFrom(originalObj)); err != nil {
+		return fmt.Errorf("failed to patch AWSPrivateLinkSubnetsAccepted condition: %w", err)
+	}
+	return nil
 }
 
 func (r *EC2NodeClassReconciler) reconcileVAP(ctx context.Context) error {

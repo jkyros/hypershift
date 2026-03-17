@@ -4,9 +4,12 @@ import (
 	"context"
 	"testing"
 
+	. "github.com/onsi/gomega"
+
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	hyperapi "github.com/openshift/hypershift/support/api"
 	"github.com/openshift/hypershift/support/awsapi"
+	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 
 	configv1 "github.com/openshift/api/config/v1"
 
@@ -16,10 +19,16 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2"
 	elbv2types "github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2/types"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/workqueue"
+	"k8s.io/utils/ptr"
 
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/log"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/go-logr/logr/testr"
 	"go.uber.org/mock/gomock"
@@ -237,6 +246,247 @@ func TestDeleteAWSEndpointService(t *testing.T) {
 		})
 	}
 }
+
+func TestListKarpenterSubnetIDs(t *testing.T) {
+	const testNamespace = "test-hcp-namespace"
+
+	testCases := []struct {
+		name              string
+		objects           []client.Object
+		expectedSubnetIDs []string
+		expectError       bool
+	}{
+		{
+			name: "When ConfigMap exists with subnet IDs it should return them",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+						Namespace: testNamespace,
+					},
+					Data: map[string]string{
+						"subnetIDs": `["subnet-aaa","subnet-bbb","subnet-ccc"]`,
+					},
+				},
+			},
+			expectedSubnetIDs: []string{"subnet-aaa", "subnet-bbb", "subnet-ccc"},
+		},
+		{
+			name: "When ConfigMap exists with empty subnetIDs it should return empty list",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+						Namespace: testNamespace,
+					},
+					Data: map[string]string{"subnetIDs": ""},
+				},
+			},
+			expectedSubnetIDs: []string{},
+		},
+		{
+			name:              "When ConfigMap does not exist it should return empty list without error",
+			objects:           []client.Object{},
+			expectedSubnetIDs: []string{},
+		},
+		{
+			name: "When ConfigMap has invalid JSON it should return error",
+			objects: []client.Object{
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+						Namespace: testNamespace,
+					},
+					Data: map[string]string{"subnetIDs": "not-valid-json"},
+				},
+			},
+			expectError: true,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			c := fake.NewClientBuilder().
+				WithScheme(hyperapi.Scheme).
+				WithObjects(tc.objects...).
+				Build()
+
+			subnetIDs, err := listKarpenterSubnetIDs(t.Context(), c, testNamespace)
+			if tc.expectError {
+				g.Expect(err).To(HaveOccurred())
+				return
+			}
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(subnetIDs).To(Equal(tc.expectedSubnetIDs))
+		})
+	}
+}
+
+func TestListSubnetIDs(t *testing.T) {
+	const testNamespace = "test-hcp-namespace"
+	const testCluster = "test-cluster"
+
+	makeNodePool := func(name, subnetID string) *hyperv1.NodePool {
+		return &hyperv1.NodePool{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: testNamespace,
+			},
+			Spec: hyperv1.NodePoolSpec{
+				ClusterName: testCluster,
+				Platform: hyperv1.NodePoolPlatform{
+					AWS: &hyperv1.AWSNodePoolPlatform{
+						Subnet: hyperv1.AWSResourceReference{ID: ptr.To(subnetID)},
+					},
+				},
+			},
+		}
+	}
+
+	makeKarpenterCM := func(subnetIDs ...string) *corev1.ConfigMap {
+		encoded := `[`
+		for i, id := range subnetIDs {
+			if i > 0 {
+				encoded += ","
+			}
+			encoded += `"` + id + `"`
+		}
+		encoded += `]`
+		return &corev1.ConfigMap{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+				Namespace: testNamespace,
+			},
+			Data: map[string]string{"subnetIDs": encoded},
+		}
+	}
+
+	testCases := []struct {
+		name              string
+		objects           []client.Object
+		expectedSubnetIDs []string
+	}{
+		{
+			name: "When karpenter-subnets ConfigMap exists it should include subnets from both NodePools and ConfigMap",
+			objects: []client.Object{
+				makeNodePool("np1", "subnet-nodepool-1"),
+				makeKarpenterCM("subnet-karpenter-1", "subnet-karpenter-2"),
+			},
+			expectedSubnetIDs: []string{"subnet-karpenter-1", "subnet-karpenter-2", "subnet-nodepool-1"},
+		},
+		{
+			name: "When karpenter-subnets ConfigMap does not exist it should return only NodePool subnets",
+			objects: []client.Object{
+				makeNodePool("np1", "subnet-nodepool-1"),
+			},
+			expectedSubnetIDs: []string{"subnet-nodepool-1"},
+		},
+		{
+			name: "When subnets overlap between NodePools and ConfigMap it should deduplicate",
+			objects: []client.Object{
+				makeNodePool("np1", "subnet-shared"),
+				makeKarpenterCM("subnet-shared", "subnet-karpenter-only"),
+			},
+			expectedSubnetIDs: []string{"subnet-karpenter-only", "subnet-shared"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			c := fake.NewClientBuilder().
+				WithScheme(hyperapi.Scheme).
+				WithObjects(tc.objects...).
+				Build()
+
+			subnetIDs, err := listSubnetIDs(t.Context(), c, testCluster, testNamespace, testNamespace)
+			g.Expect(err).ToNot(HaveOccurred())
+			g.Expect(subnetIDs).To(Equal(tc.expectedSubnetIDs))
+		})
+	}
+}
+
+func TestEnqueueOnKarpenterConfigMapChange(t *testing.T) {
+	testCases := []struct {
+		name           string
+		oldData        map[string]string
+		newData        map[string]string
+		newLabels      map[string]string
+		mapName        string
+		expectedQueued bool
+	}{
+		{
+			name:           "When ConfigMap subnetIDs change it should enqueue AWSEndpointServices",
+			mapName:        karpenterutil.KarpenterSubnetsConfigMapName,
+			newLabels:      map[string]string{karpenterutil.ManagedByKarpenterLabel: "true"},
+			oldData:        map[string]string{"subnetIDs": `["subnet-aaa"]`},
+			newData:        map[string]string{"subnetIDs": `["subnet-aaa","subnet-bbb"]`},
+			expectedQueued: true,
+		},
+		{
+			name:           "When ConfigMap subnetIDs do not change it should not enqueue",
+			mapName:        karpenterutil.KarpenterSubnetsConfigMapName,
+			newLabels:      map[string]string{karpenterutil.ManagedByKarpenterLabel: "true"},
+			oldData:        map[string]string{"subnetIDs": `["subnet-aaa"]`},
+			newData:        map[string]string{"subnetIDs": `["subnet-aaa"]`},
+			expectedQueued: false,
+		},
+		{
+			name:           "When ConfigMap lacks managed-by label it should not enqueue",
+			mapName:        karpenterutil.KarpenterSubnetsConfigMapName,
+			newLabels:      map[string]string{},
+			oldData:        map[string]string{"subnetIDs": `["subnet-aaa"]`},
+			newData:        map[string]string{"subnetIDs": `["subnet-bbb"]`},
+			expectedQueued: false,
+		},
+		{
+			name:           "When ConfigMap name does not match it should not enqueue",
+			mapName:        "some-other-configmap",
+			newLabels:      map[string]string{karpenterutil.ManagedByKarpenterLabel: "true"},
+			oldData:        map[string]string{"subnetIDs": `["subnet-aaa"]`},
+			newData:        map[string]string{"subnetIDs": `["subnet-bbb"]`},
+			expectedQueued: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+
+			r := &AWSEndpointServiceReconciler{}
+			handler := r.enqueueOnKarpenterConfigMapChange(nil)
+			q := &fakeQueue{}
+
+			handler(t.Context(), event.UpdateEvent{
+				ObjectOld: &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: tc.mapName, Namespace: "test-ns"},
+					Data:       tc.oldData,
+				},
+				ObjectNew: &corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{Name: tc.mapName, Namespace: "test-ns", Labels: tc.newLabels},
+					Data:       tc.newData,
+				},
+			}, q)
+
+			if tc.expectedQueued {
+				g.Expect(q.items).NotTo(BeEmpty())
+			} else {
+				g.Expect(q.items).To(BeEmpty())
+			}
+		})
+	}
+}
+
+// fakeQueue is a minimal implementation of workqueue for testing purposes.
+type fakeQueue struct {
+	items []reconcile.Request
+	workqueue.TypedRateLimitingInterface[reconcile.Request]
+}
+
+func (q *fakeQueue) Add(item reconcile.Request) { q.items = append(q.items, item) }
 
 func Test_controlPlaneOperatorRoleARNWithoutPath(t *testing.T) {
 	tests := []struct {
