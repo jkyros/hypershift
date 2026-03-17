@@ -36,11 +36,13 @@ import (
 	"k8s.io/client-go/util/workqueue"
 
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	"github.com/go-logr/logr"
@@ -102,7 +104,10 @@ func (r *AWSEndpointServiceReconciler) SetupWithManager(mgr ctrl.Manager) error 
 		Watches(&corev1.ConfigMap{}, handler.Funcs{
 			CreateFunc: r.enqueueOnKarpenterConfigMapCreate(mgr),
 			UpdateFunc: r.enqueueOnKarpenterConfigMapChange(mgr),
-		}).
+		}, builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
+			return o.GetName() == karpenterutil.KarpenterSubnetsConfigMapName &&
+				o.GetLabels()[karpenterutil.ManagedByKarpenterLabel] == "true"
+		}))).
 		WithOptions(controller.Options{
 			RateLimiter:             workqueue.NewTypedItemExponentialFailureRateLimiter[reconcile.Request](3*time.Second, 30*time.Second),
 			MaxConcurrentReconciles: 10,
