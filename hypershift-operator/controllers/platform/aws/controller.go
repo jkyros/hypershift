@@ -359,7 +359,7 @@ func reconcileAWSEndpointService(ctx context.Context, c client.Client, awsEndpoi
 }
 
 func reconcileAWSEndpointServiceSubnetIDs(ctx context.Context, c client.Client, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
-	subnetIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace)
+	subnetIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace, awsEndpointService.Namespace)
 	if err != nil {
 		return fmt.Errorf("failed to list subnetIDs: %w", err)
 	}
@@ -381,7 +381,7 @@ func listNodePools(ctx context.Context, c client.Client, nodePoolNamespace strin
 	return filtered, nil
 }
 
-func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNamespace string) ([]string, error) {
+func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNamespace, hcpNamespace string) ([]string, error) {
 	// Get subnets from NodePools
 	nodePools, err := listNodePools(ctx, c, nodePoolNamespace, clusterName)
 	if err != nil {
@@ -396,7 +396,7 @@ func listSubnetIDs(ctx context.Context, c client.Client, clusterName, nodePoolNa
 	}
 
 	// Get subnets from Karpenter ConfigMap
-	karpenterSubnets, err := listKarpenterSubnetIDs(ctx, c, nodePoolNamespace)
+	karpenterSubnets, err := listKarpenterSubnetIDs(ctx, c, hcpNamespace)
 	if err != nil {
 		// Log but don't fail - ConfigMap might not exist yet
 		ctrl.LoggerFrom(ctx).V(4).Info("Failed to get Karpenter subnets, continuing with NodePool subnets only", "error", err)

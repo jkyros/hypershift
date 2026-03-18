@@ -385,13 +385,15 @@ func TestListSubnetIDs(t *testing.T) {
 		name            string
 		clusterName     string
 		namespace       string
+		hcpNamespace    string
 		objects         []client.Object
 		expectedSubnets []string
 	}{
 		{
-			name:        "When a karpenter-subnets ConfigMap exists it should include subnets from both NodePools and the ConfigMap",
-			clusterName: "my-cluster",
-			namespace:   "clusters",
+			name:         "When a karpenter-subnets ConfigMap exists it should include subnets from both NodePools and the ConfigMap",
+			clusterName:  "my-cluster",
+			namespace:    "clusters",
+			hcpNamespace: "clusters-my-cluster",
 			objects: []client.Object{
 				&hyperv1.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
@@ -412,7 +414,7 @@ func TestListSubnetIDs(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
-						Namespace: "clusters",
+						Namespace: "clusters-my-cluster",
 					},
 					Data: map[string]string{
 						"subnetIDs": `["subnet-karpenter-a","subnet-karpenter-b"]`,
@@ -422,9 +424,10 @@ func TestListSubnetIDs(t *testing.T) {
 			expectedSubnets: []string{"subnet-karpenter-a", "subnet-karpenter-b", "subnet-nodepool"},
 		},
 		{
-			name:        "When no karpenter-subnets ConfigMap exists it should return only NodePool subnets",
-			clusterName: "my-cluster",
-			namespace:   "clusters",
+			name:         "When no karpenter-subnets ConfigMap exists it should return only NodePool subnets",
+			clusterName:  "my-cluster",
+			namespace:    "clusters",
+			hcpNamespace: "clusters-my-cluster",
 			objects: []client.Object{
 				&hyperv1.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
@@ -449,13 +452,15 @@ func TestListSubnetIDs(t *testing.T) {
 			name:            "When there are no NodePools and no ConfigMap it should return an empty list",
 			clusterName:     "my-cluster",
 			namespace:       "clusters",
+			hcpNamespace:    "clusters-my-cluster",
 			objects:         []client.Object{},
 			expectedSubnets: []string{},
 		},
 		{
-			name:        "When NodePool and ConfigMap have overlapping subnets it should deduplicate",
-			clusterName: "my-cluster",
-			namespace:   "clusters",
+			name:         "When NodePool and ConfigMap have overlapping subnets it should deduplicate",
+			clusterName:  "my-cluster",
+			namespace:    "clusters",
+			hcpNamespace: "clusters-my-cluster",
 			objects: []client.Object{
 				&hyperv1.NodePool{
 					ObjectMeta: metav1.ObjectMeta{
@@ -476,7 +481,7 @@ func TestListSubnetIDs(t *testing.T) {
 				&corev1.ConfigMap{
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
-						Namespace: "clusters",
+						Namespace: "clusters-my-cluster",
 					},
 					Data: map[string]string{
 						"subnetIDs": `["subnet-shared","subnet-karpenter-only"]`,
@@ -496,7 +501,7 @@ func TestListSubnetIDs(t *testing.T) {
 				WithObjects(tc.objects...).
 				Build()
 
-			subnets, err := listSubnetIDs(t.Context(), fakeClient, tc.clusterName, tc.namespace)
+			subnets, err := listSubnetIDs(t.Context(), fakeClient, tc.clusterName, tc.namespace, tc.hcpNamespace)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(subnets).To(Equal(tc.expectedSubnets))
 		})

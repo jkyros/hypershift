@@ -13,7 +13,6 @@ import (
 	hyperv1 "github.com/openshift/hypershift/api/hypershift/v1beta1"
 	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1beta1"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/nodepool"
-	nodepool "github.com/openshift/hypershift/hypershift-operator/controllers/nodepool"
 	hyperapi "github.com/openshift/hypershift/support/api"
 	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/upsert"
