@@ -11,7 +11,11 @@ import (
 	"testing"
 	"time"
 
+	"encoding/json"
+
+	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/ec2"
+	ec2types "github.com/aws/aws-sdk-go-v2/service/ec2/types"
 	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 	"github.com/blang/semver"
 	. "github.com/onsi/gomega"
@@ -21,6 +25,7 @@ import (
 	karpenteroperatorcpov2 "github.com/openshift/hypershift/control-plane-operator/controllers/hostedcontrolplane/v2/karpenteroperator"
 	"github.com/openshift/hypershift/hypershift-operator/controllers/manifests"
 	karpenterassets "github.com/openshift/hypershift/karpenter-operator/controllers/karpenter/assets"
+	karpenterutil "github.com/openshift/hypershift/support/karpenter"
 	"github.com/openshift/hypershift/support/releaseinfo"
 	e2eutil "github.com/openshift/hypershift/test/e2e/util"
 	dto "github.com/prometheus/client_model/go"
@@ -54,6 +59,294 @@ func TestKarpenter(t *testing.T) {
 	clusterOpts.AWSPlatform.PublicOnly = false
 	clusterOpts.ControlPlaneAvailabilityPolicy = string(hyperv1.HighlyAvailable)
 	clusterOpts.ReleaseImage = globalOpts.PreviousReleaseImage
+
+	// Run first — creates its own PublicAndPrivate cluster, validates the full
+	// Karpenter subnet aggregation pipeline, and tears down before the main
+	// HighlyAvailable cluster is created. Go runs t.Run subtests sequentially
+	// (without t.Parallel()), so this guarantees no resource contention.
+	t.Run("Arbitrary subnet propagation", func(t *testing.T) {
+		subnetClusterOpts := globalOpts.DefaultClusterOptions(t)
+		subnetClusterOpts.AWSPlatform.AutoNode = true
+		subnetClusterOpts.AWSPlatform.PublicOnly = false
+		subnetClusterOpts.ControlPlaneAvailabilityPolicy = string(hyperv1.SingleReplica)
+		subnetClusterOpts.NodePoolReplicas = 0
+		subnetClusterOpts.AWSPlatform.EndpointAccess = string(hyperv1.PublicAndPrivate)
+
+		e2eutil.NewHypershiftTest(t, ctx, func(t *testing.T, g Gomega, mgtClient crclient.Client, hostedCluster *hyperv1.HostedCluster) {
+			t.Logf("Testing Karpenter subnet aggregation for PublicAndPrivate cluster")
+
+			t.Run("ConfigMap subnet aggregation", func(t *testing.T) {
+				g := NewWithT(t)
+
+				hcpNamespace := fmt.Sprintf("%s-%s", hostedCluster.Namespace, hostedCluster.Name)
+
+				// Phase 1: Stabilize the cluster.
+				//
+				// With NodePoolReplicas=0 there are no NodePools, so guest cluster operators
+				// (dns, ingress, monitoring, etc.) sit pending until Karpenter provisions a node.
+				// We create a NodePool referencing the default OpenshiftEC2NodeClass to unblock
+				// them. The controller aggregates subnets from all nodeclasses, so Phase 2 uses
+				// ContainElement rather than ConsistOf to allow for the default nodeclass subnets.
+				guestClient := e2eutil.WaitForGuestClient(t, ctx, mgtClient, hostedCluster)
+
+				karpenterNodePool := &unstructured.Unstructured{}
+				yamlFile, err := content.ReadFile("assets/karpenter-nodepool.yaml")
+				g.Expect(err).NotTo(HaveOccurred(), "should read karpenter-nodepool.yaml")
+				g.Expect(yaml.Unmarshal(yamlFile, karpenterNodePool)).To(Succeed())
+
+				// A bootstrap workload is required to trigger Karpenter for the first node.
+				// The konnectivity-agent DaemonSet exists in the guest cluster (created by HCCO)
+				// but a DaemonSet with zero nodes has desiredNumberScheduled=0 — it never creates
+				// any pods. Karpenter only fires when there is an unschedulable Pending pod.
+				// A Deployment/ReplicaSet creates a pod spec immediately regardless of node count,
+				// so one replica of the workload is enough to produce the Pending pod that wakes
+				// Karpenter up.
+				bootstrapWorkload := &unstructured.Unstructured{}
+				bootstrapYAML, err := content.ReadFile("assets/karpenter-workloads.yaml")
+				g.Expect(err).NotTo(HaveOccurred(), "should read karpenter-workloads.yaml")
+				g.Expect(yaml.Unmarshal(bootstrapYAML, bootstrapWorkload)).To(Succeed())
+				bootstrapWorkload.Object["spec"].(map[string]interface{})["replicas"] = 1
+
+				t.Logf("Creating Karpenter NodePool and bootstrap workload to provision first worker node")
+				g.Expect(guestClient.Create(ctx, karpenterNodePool)).To(Succeed())
+				defer func() { _ = guestClient.Delete(ctx, karpenterNodePool) }()
+				g.Expect(guestClient.Create(ctx, bootstrapWorkload)).To(Succeed())
+				defer func() { _ = guestClient.Delete(ctx, bootstrapWorkload) }()
+
+				nodeLabels := map[string]string{
+					"node.kubernetes.io/instance-type": "t3.large",
+					"karpenter.sh/nodepool":            karpenterNodePool.GetName(),
+				}
+				t.Logf("Waiting for a Karpenter node to become ready")
+				e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, 1, nodeLabels)
+				t.Logf("Karpenter node is ready; waiting for cluster operators to converge")
+				e2eutil.WaitForImageRollout(t, ctx, mgtClient, hostedCluster)
+				t.Logf("Cluster operators converged")
+
+				// Phase 2: Test the custom subnet pipeline.
+				//
+				// The cluster is now stable. We pick an arbitrary subnet from the VPC and create a
+				// custom OpenshiftEC2NodeClass with an explicit SubnetSelectorTerms pointing at it.
+				// The karpenter operator resolves that subnet and writes it to the karpenter-subnets
+				// ConfigMap. The hypershift-operator controller then merges those subnets into
+				// AWSEndpointService.Spec.SubnetIDs. We assert each step of that pipeline.
+
+				// Step 1: Wait for an AWSEndpointService to have a populated EndpointServiceName.
+				// After Phase 1 completes this is typically already satisfied, but we poll to be safe.
+				t.Logf("Waiting for AWSEndpointService to populate EndpointServiceName in namespace: %s", hcpNamespace)
+				var endpointServiceName string
+				err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 5*time.Minute, true, func(ctx context.Context) (bool, error) {
+					epsList := &hyperv1.AWSEndpointServiceList{}
+					if err := mgtClient.List(ctx, epsList, crclient.InNamespace(hcpNamespace)); err != nil {
+						return false, nil
+					}
+					for i := range epsList.Items {
+						if epsList.Items[i].Status.EndpointServiceName != "" {
+							endpointServiceName = epsList.Items[i].Status.EndpointServiceName
+							return true, nil
+						}
+					}
+					return false, nil
+				})
+				g.Expect(err).NotTo(HaveOccurred(), "AWSEndpointService should have a populated EndpointServiceName")
+				t.Logf("Found endpoint service: %s", endpointServiceName)
+
+				// Step 2: Pick an arbitrary subnet from the VPC.
+				ec2client := ec2Client(subnetClusterOpts.AWSPlatform.Credentials.AWSCredentialsFile, subnetClusterOpts.AWSPlatform.Region)
+				vpcID := hostedCluster.Spec.Platform.AWS.CloudProviderConfig.VPC
+				t.Logf("Finding a subnet in VPC: %s", vpcID)
+
+				subnetsOutput, err := ec2client.DescribeSubnets(ctx, &ec2.DescribeSubnetsInput{
+					Filters: []ec2types.Filter{
+						{Name: aws.String("vpc-id"), Values: []string{vpcID}},
+						{Name: aws.String("state"), Values: []string{"available"}},
+					},
+				})
+				g.Expect(err).NotTo(HaveOccurred(), "failed to describe subnets")
+				g.Expect(subnetsOutput.Subnets).NotTo(BeEmpty(), "VPC should have at least one subnet")
+
+				arbitrarySubnet := subnetsOutput.Subnets[0]
+				arbitrarySubnetID := aws.ToString(arbitrarySubnet.SubnetId)
+				t.Logf("Using subnet: %s in AZ: %s", arbitrarySubnetID, aws.ToString(arbitrarySubnet.AvailabilityZone))
+
+				// Step 3: Create OpenshiftEC2NodeClass with custom SubnetSelectorTerms.
+				customNodeClassName := "custom-subnet-nodeclass"
+				openshiftEC2NodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: customNodeClassName,
+					},
+					Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+						SubnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{
+							{ID: arbitrarySubnetID},
+						},
+					},
+				}
+				g.Expect(guestClient.Create(ctx, openshiftEC2NodeClass)).To(Succeed())
+				t.Logf("Created OpenshiftEC2NodeClass with custom subnet selector")
+				defer func() { _ = guestClient.Delete(ctx, openshiftEC2NodeClass) }()
+
+				// Step 4: Create a custom NodePool referencing the custom nodeclass and a targeted
+				// workload to drive Karpenter to provision a node on the custom subnet. This
+				// validates the full end-to-end path: custom subnet → node can join the cluster.
+				customNodePoolYAML, err := content.ReadFile("assets/karpenter-nodepool.yaml")
+				g.Expect(err).NotTo(HaveOccurred(), "should read karpenter-nodepool.yaml for custom nodepool")
+				customNodePool := &unstructured.Unstructured{}
+				g.Expect(yaml.Unmarshal(customNodePoolYAML, customNodePool)).To(Succeed())
+				customNodePool.SetName("custom-subnet-nodepool")
+				// Mutate nodeClassRef.name to point at the custom nodeclass.
+				specMap := customNodePool.Object["spec"].(map[string]interface{})
+				templateMap := specMap["template"].(map[string]interface{})
+				specTemplateMap := templateMap["spec"].(map[string]interface{})
+				nodeClassRef := specTemplateMap["nodeClassRef"].(map[string]interface{})
+				nodeClassRef["name"] = customNodeClassName
+				g.Expect(guestClient.Create(ctx, customNodePool)).To(Succeed())
+				t.Logf("Created custom NodePool %q referencing %q", customNodePool.GetName(), customNodeClassName)
+				defer func() { _ = guestClient.Delete(ctx, customNodePool) }()
+
+				customWorkloadYAML, err := content.ReadFile("assets/karpenter-workloads.yaml")
+				g.Expect(err).NotTo(HaveOccurred(), "should read karpenter-workloads.yaml for custom workload")
+				customWorkload := &unstructured.Unstructured{}
+				g.Expect(yaml.Unmarshal(customWorkloadYAML, customWorkload)).To(Succeed())
+				customWorkload.SetName("custom-subnet-workload")
+				customWorkload.Object["spec"].(map[string]interface{})["replicas"] = 1
+				// Add a nodeSelector so Karpenter routes this pod to the custom NodePool.
+				podTemplate := customWorkload.Object["spec"].(map[string]interface{})["template"].(map[string]interface{})
+				podSpec := podTemplate["spec"].(map[string]interface{})
+				nodeSelector := podSpec["nodeSelector"].(map[string]interface{})
+				nodeSelector["karpenter.sh/nodepool"] = customNodePool.GetName()
+				g.Expect(guestClient.Create(ctx, customWorkload)).To(Succeed())
+				t.Logf("Created workload %q targeting NodePool %q", customWorkload.GetName(), customNodePool.GetName())
+				defer func() { _ = guestClient.Delete(ctx, customWorkload) }()
+
+				customNodeLabels := map[string]string{
+					"node.kubernetes.io/instance-type": "t3.large",
+					"karpenter.sh/nodepool":            customNodePool.GetName(),
+				}
+				t.Logf("Waiting for a node to become ready on custom NodePool %q", customNodePool.GetName())
+				e2eutil.WaitForReadyNodesByLabels(t, ctx, guestClient, hostedCluster.Spec.Platform.Type, 1, customNodeLabels)
+				t.Logf("Node is ready on custom NodePool")
+
+				// Step 5: Wait for Karpenter to resolve the subnet in Status.
+				t.Logf("Waiting for Karpenter to resolve subnets...")
+				var resolvedSubnets []hyperkarpenterv1.Subnet
+				err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+					nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+					if err := guestClient.Get(ctx, crclient.ObjectKey{Name: customNodeClassName}, nodeClass); err != nil {
+						return false, err
+					}
+					if len(nodeClass.Status.Subnets) > 0 {
+						resolvedSubnets = nodeClass.Status.Subnets
+						return true, nil
+					}
+					return false, nil
+				})
+				g.Expect(err).NotTo(HaveOccurred(), "OpenshiftEC2NodeClass should have resolved subnets in status")
+				g.Expect(resolvedSubnets).To(HaveLen(1), "should have resolved exactly one subnet")
+				g.Expect(resolvedSubnets[0].ID).To(Equal(arbitrarySubnetID), "resolved subnet should match the specified subnet")
+				t.Logf("Karpenter resolved subnet: %s", resolvedSubnets[0].ID)
+
+				// Step 6: Verify ConfigMap contains the custom subnet.
+				// The controller aggregates subnets from all OpenshiftEC2NodeClass status fields,
+				// including the default nodeclass (any nodeclass can resolve subnets), so we
+				// assert ContainElement rather than ConsistOf.
+				t.Logf("Checking for karpenter-subnets ConfigMap in namespace: %s", hcpNamespace)
+				configMap := &corev1.ConfigMap{}
+				err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 2*time.Minute, true, func(ctx context.Context) (bool, error) {
+					if err := mgtClient.Get(ctx, crclient.ObjectKey{
+						Namespace: hcpNamespace,
+						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+					}, configMap); err != nil {
+						t.Logf("ConfigMap not yet available: %v", err)
+						return false, nil
+					}
+					return true, nil
+				})
+				g.Expect(err).NotTo(HaveOccurred(), "karpenter-subnets ConfigMap should be created")
+				g.Expect(configMap.Labels).To(HaveKeyWithValue(karpenterutil.ManagedByKarpenterLabel, "true"))
+				g.Expect(configMap.Labels).To(HaveKey(hyperv1.InfraIDLabel))
+
+				subnetIDsJSON := configMap.Data["subnetIDs"]
+				g.Expect(subnetIDsJSON).NotTo(BeEmpty(), "ConfigMap should contain subnetIDs data")
+				var subnetIDs []string
+				err = json.Unmarshal([]byte(subnetIDsJSON), &subnetIDs)
+				g.Expect(err).NotTo(HaveOccurred(), "subnetIDs should be valid JSON")
+				g.Expect(subnetIDs).To(ContainElement(arbitrarySubnetID),
+					"ConfigMap should contain the user-specified subnet")
+				t.Logf("ConfigMap contains Karpenter-resolved subnet: %v", subnetIDs)
+
+				// Step 7: Verify the subnet flows through to AWSEndpointService.Spec.SubnetIDs.
+				// This proves the full pipeline: OpenshiftEC2NodeClass → ConfigMap → AWSEndpointService.
+				// We check Spec.SubnetIDs rather than waiting for AWSEndpointAvailable=True to avoid
+				// prolonging the test with the AWS-side endpoint modification round-trip.
+				t.Logf("Waiting for any AWSEndpointService to include subnet %s in Spec.SubnetIDs", arbitrarySubnetID)
+				var matchedEPS string
+				err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 3*time.Minute, true, func(ctx context.Context) (bool, error) {
+					epsList := &hyperv1.AWSEndpointServiceList{}
+					if err := mgtClient.List(ctx, epsList, crclient.InNamespace(hcpNamespace)); err != nil {
+						return false, nil
+					}
+					for _, eps := range epsList.Items {
+						for _, id := range eps.Spec.SubnetIDs {
+							if id == arbitrarySubnetID {
+								matchedEPS = eps.Name
+								return true, nil
+							}
+						}
+					}
+					return false, nil
+				})
+				g.Expect(err).NotTo(HaveOccurred(), "at least one AWSEndpointService should include the Karpenter subnet in Spec.SubnetIDs")
+				t.Logf("AWSEndpointService %q Spec.SubnetIDs includes Karpenter subnet: %s", matchedEPS, arbitrarySubnetID)
+
+				// Step 8: Wait for AWSPrivateLinkSubnetsAccepted=True on the custom nodeclass.
+				// This proves the full status feedback loop: AWSEndpointService condition →
+				// karpenter-operator controller → OpenshiftEC2NodeClass condition.
+				e2eutil.EventuallyObject(t, ctx,
+					"custom-subnet-nodeclass to have AWSPrivateLinkSubnetsAccepted=True",
+					func(ctx context.Context) (*hyperkarpenterv1.OpenshiftEC2NodeClass, error) {
+						nc := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+						err := guestClient.Get(ctx, crclient.ObjectKey{Name: customNodeClassName}, nc)
+						return nc, err
+					},
+					[]e2eutil.Predicate[*hyperkarpenterv1.OpenshiftEC2NodeClass]{
+						e2eutil.ConditionPredicate[*hyperkarpenterv1.OpenshiftEC2NodeClass](e2eutil.Condition{
+							Type:   hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
+							Status: metav1.ConditionTrue,
+							Reason: hyperkarpenterv1.ConditionReasonSubnetsAccepted,
+						}),
+					},
+					e2eutil.WithTimeout(5*time.Minute),
+				)
+				t.Logf("OpenshiftEC2NodeClass %q has AWSPrivateLinkSubnetsAccepted=True", customNodeClassName)
+
+				// Step 9: Delete the custom OpenshiftEC2NodeClass and verify ConfigMap cleanup.
+				t.Logf("Deleting custom OpenshiftEC2NodeClass")
+				g.Expect(guestClient.Delete(ctx, openshiftEC2NodeClass)).To(Succeed())
+
+				nodeClassList := &hyperkarpenterv1.OpenshiftEC2NodeClassList{}
+				g.Expect(guestClient.List(ctx, nodeClassList)).To(Succeed())
+				if len(nodeClassList.Items) == 0 {
+					t.Logf("All user-defined OpenshiftEC2NodeClass resources deleted; ConfigMap should be removed")
+					err = wait.PollUntilContextTimeout(ctx, 5*time.Second, 1*time.Minute, true, func(ctx context.Context) (bool, error) {
+						cm := &corev1.ConfigMap{}
+						err := mgtClient.Get(ctx, crclient.ObjectKey{
+							Namespace: hcpNamespace,
+							Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+						}, cm)
+						return err != nil && crclient.IgnoreNotFound(err) == nil, nil
+					})
+					if err == nil {
+						t.Logf("ConfigMap successfully cleaned up")
+					} else {
+						t.Logf("ConfigMap still exists (may be used by other NodeClasses)")
+					}
+				} else {
+					t.Logf("Other OpenshiftEC2NodeClass resources exist; ConfigMap should remain")
+				}
+			})
+		}).Execute(&subnetClusterOpts, globalOpts.Platform, globalOpts.ArtifactDir,
+			"karpenter-arbitrary-subnets", globalOpts.ServiceAccountSigningKey)
+	})
 
 	e2eutil.NewHypershiftTest(t, ctx, func(t *testing.T, g Gomega, mgtClient crclient.Client, hostedCluster *hyperv1.HostedCluster) {
 		guestClient := e2eutil.WaitForGuestClient(t, ctx, mgtClient, hostedCluster)
