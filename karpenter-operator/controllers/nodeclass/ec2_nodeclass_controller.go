@@ -108,7 +108,11 @@ func (r *EC2NodeClassReconciler) SetupWithManager(ctx context.Context, mgr ctrl.
 		// Watch HostedControlPlane for annotation changes
 		WatchesRawSource(source.Kind[client.Object](managementCluster.GetCache(), &hyperv1.HostedControlPlane{},
 			handler.EnqueueRequestsFromMapFunc(r.mapToOpenShiftEC2NodeClasses),
-			r.hcpAnnotationPredicate()))
+			r.hcpAnnotationPredicate())).
+		// Watch AWSEndpointService status changes so the AWSPrivateLinkSubnetsAccepted condition stays current
+		WatchesRawSource(source.Kind[client.Object](managementCluster.GetCache(), &hyperv1.AWSEndpointService{},
+			handler.EnqueueRequestsFromMapFunc(r.mapToOpenShiftEC2NodeClasses),
+			r.awsEndpointServicePredicate()))
 	return bldr.Complete(r)
 }
 
@@ -510,7 +514,7 @@ func (r *EC2NodeClassReconciler) reconcilePrivateLinkCondition(ctx context.Conte
 			meta.SetStatusCondition(&openshiftNodeClass.Status.Conditions, metav1.Condition{
 				Type:               hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
 				Status:             metav1.ConditionUnknown,
-				Reason:             hyperkarpenterv1.ConditionReasonNoSubnetsResolved,
+				Reason:             hyperkarpenterv1.ConditionReasonPrivateLinkUnknown,
 				Message:            "AWSEndpointService kube-apiserver-private not found; cluster may not be private",
 				ObservedGeneration: openshiftNodeClass.Generation,
 			})
@@ -530,7 +534,7 @@ func (r *EC2NodeClassReconciler) reconcilePrivateLinkCondition(ctx context.Conte
 		newCondition = metav1.Condition{
 			Type:               hyperkarpenterv1.ConditionTypeAWSPrivateLinkSubnetsAccepted,
 			Status:             metav1.ConditionUnknown,
-			Reason:             hyperkarpenterv1.ConditionReasonNoSubnetsResolved,
+			Reason:             hyperkarpenterv1.ConditionReasonPrivateLinkUnknown,
 			Message:            "AWSEndpointService availability not yet determined",
 			ObservedGeneration: openshiftNodeClass.Generation,
 		}
@@ -704,6 +708,20 @@ func (r *EC2NodeClassReconciler) hcpAnnotationPredicate() predicate.Predicate {
 			return false
 		},
 		DeleteFunc:  func(e event.DeleteEvent) bool { return false },
+		GenericFunc: func(e event.GenericEvent) bool { return false },
+	}
+}
+
+// awsEndpointServicePredicate filters AWSEndpointService events to only trigger reconciliation
+// when the kube-apiserver-private endpoint service in the HCP namespace changes status.
+func (r *EC2NodeClassReconciler) awsEndpointServicePredicate() predicate.Predicate {
+	filter := func(obj client.Object) bool {
+		return obj.GetNamespace() == r.Namespace && obj.GetName() == manifests.KubeAPIServerPrivateServiceName
+	}
+	return predicate.Funcs{
+		CreateFunc:  func(e event.CreateEvent) bool { return filter(e.Object) },
+		UpdateFunc:  func(e event.UpdateEvent) bool { return filter(e.ObjectNew) },
+		DeleteFunc:  func(e event.DeleteEvent) bool { return filter(e.Object) },
 		GenericFunc: func(e event.GenericEvent) bool { return false },
 	}
 }

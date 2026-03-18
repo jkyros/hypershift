@@ -71,6 +71,10 @@ const (
 	// ConditionReasonNoSubnetsResolved is set when the nodeclass has no resolved
 	// subnets in status yet.
 	ConditionReasonNoSubnetsResolved = "NoSubnetsResolved"
+
+	// ConditionReasonPrivateLinkUnknown is set when the private link endpoint service
+	// status cannot be determined (e.g., not found or condition not yet reported).
+	ConditionReasonPrivateLinkUnknown = "PrivateLinkUnknown"
 )
 
 // Subnet contains resolved Subnet selector values utilized for node launch
