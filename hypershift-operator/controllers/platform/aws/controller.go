@@ -333,7 +333,7 @@ func (r *AWSEndpointServiceReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	// Reconcile the AWSEndpointService Spec
 	if _, err := r.CreateOrUpdate(ctx, r.Client, awsEndpointService, func() error {
-		return reconcileAWSEndpointService(ctx, r, awsEndpointService, hc)
+		return reconcileAWSEndpointService(ctx, r, r.ec2Client, awsEndpointService, hc)
 	}); err != nil {
 		return ctrl.Result{}, fmt.Errorf("failed to reconcile AWSEndpointService spec: %w", err)
 	}
@@ -378,20 +378,76 @@ func (r *AWSEndpointServiceReconciler) Reconcile(ctx context.Context, req ctrl.R
 	return ctrl.Result{RequeueAfter: 5 * time.Minute}, nil
 }
 
-func reconcileAWSEndpointService(ctx context.Context, c client.Client, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
+func reconcileAWSEndpointService(ctx context.Context, c client.Client, ec2Client awsapi.EC2API, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
 	if awsEndpointService.Annotations == nil {
 		awsEndpointService.Annotations = make(map[string]string)
 	}
 	awsEndpointService.Annotations[supportutil.HostedClusterAnnotation] = fmt.Sprintf("%s/%s", hc.Namespace, hc.Name)
-	return reconcileAWSEndpointServiceSubnetIDs(ctx, c, awsEndpointService, hc)
+	return reconcileAWSEndpointServiceSubnetIDs(ctx, c, ec2Client, awsEndpointService, hc)
 }
 
-func reconcileAWSEndpointServiceSubnetIDs(ctx context.Context, c client.Client, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
-	subnetIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace, awsEndpointService.Namespace)
+func reconcileAWSEndpointServiceSubnetIDs(ctx context.Context, c client.Client, ec2Client awsapi.EC2API, awsEndpointService *hyperv1.AWSEndpointService, hc *hyperv1.HostedCluster) error {
+	log := ctrl.LoggerFrom(ctx)
+
+	desiredIDs, err := listSubnetIDs(ctx, c, hc.Name, hc.Namespace, awsEndpointService.Namespace)
 	if err != nil {
 		return fmt.Errorf("failed to list subnetIDs: %w", err)
 	}
-	awsEndpointService.Spec.SubnetIDs = subnetIDs
+
+	currentSet := sets.NewString(awsEndpointService.Spec.SubnetIDs...)
+	desiredSet := sets.NewString(desiredIDs...)
+
+	if currentSet.Equal(desiredSet) {
+		return nil
+	}
+
+	added := desiredSet.Difference(currentSet)
+	removed := currentSet.Difference(desiredSet)
+
+	// Start with current minus removed.
+	result := currentSet.Difference(removed)
+
+	if added.Len() > 0 {
+		// DescribeSubnets for current + added to get AZ info for dedup.
+		toDescribe := result.Union(added).List()
+		out, err := ec2Client.DescribeSubnets(ctx, &ec2v2.DescribeSubnetsInput{
+			SubnetIds: toDescribe,
+		})
+		if err != nil {
+			return fmt.Errorf("failed to describe subnets for AZ dedup: %w", err)
+		}
+
+		subnetAZ := map[string]string{}
+		for _, s := range out.Subnets {
+			subnetAZ[awsv2.ToString(s.SubnetId)] = awsv2.ToString(s.AvailabilityZone)
+		}
+
+		// Collect AZs already covered by current (non-removed) subnets.
+		usedAZs := sets.NewString()
+		for _, id := range result.List() {
+			if az, ok := subnetAZ[id]; ok {
+				usedAZs.Insert(az)
+			}
+		}
+
+		// Only add new subnets whose AZ isn't already covered.
+		for _, id := range added.List() {
+			az, ok := subnetAZ[id]
+			if !ok {
+				continue // subnet not found in AWS, skip
+			}
+			if usedAZs.Has(az) {
+				log.Info("Skipping subnet: AZ already covered by existing subnet",
+					"subnet", id, "az", az)
+				continue
+			}
+			result.Insert(id)
+			usedAZs.Insert(az)
+		}
+	}
+
+	awsEndpointService.Spec.SubnetIDs = result.List()
+	sort.Strings(awsEndpointService.Spec.SubnetIDs)
 	return nil
 }
 

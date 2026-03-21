@@ -762,6 +762,88 @@ func TestKarpenter(t *testing.T) {
 				endpointServiceName, vpcID, supportedAZs, usedAZs)
 			t.Logf("Selected AZ %s for test subnet (supported by endpoint service, not in VPC)", az)
 
+			// --- Dedup verification: create a subnet in an already-occupied AZ and verify it gets filtered ---
+			var occupiedAZ string
+			for occupiedAZ = range usedAZs {
+				break
+			}
+			t.Logf("Testing AZ dedup: creating a duplicate subnet in already-occupied AZ %s", occupiedAZ)
+			dupSubnetID, cleanupDupSubnet := e2eutil.CreateTestSubnet(ctx, t, ec2client, vpcID, occupiedAZ, hostedCluster.Spec.InfraID)
+			t.Logf("Created duplicate test subnet %s in AZ %s", dupSubnetID, occupiedAZ)
+
+			dupNodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
+				ObjectMeta: metav1.ObjectMeta{Name: "duplicate-az-test"},
+				Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
+					SubnetSelectorTerms: []hyperkarpenterv1.SubnetSelectorTerm{{ID: dupSubnetID}},
+					SecurityGroupSelectorTerms: []hyperkarpenterv1.SecurityGroupSelectorTerm{
+						{Tags: map[string]string{"karpenter.sh/discovery": hostedCluster.Spec.InfraID}},
+					},
+				},
+			}
+			g.Expect(guestClient.Create(ctx, dupNodeClass)).To(Succeed())
+			t.Logf("Created duplicate-AZ NodeClass %q selecting subnet %s", dupNodeClass.Name, dupSubnetID)
+
+			// Wait for the NodeClass status to resolve the subnet.
+			t.Logf("Waiting for duplicate-AZ NodeClass status to reflect subnet %s", dupSubnetID)
+			g.Eventually(func(g Gomega) {
+				nc := &hyperkarpenterv1.OpenshiftEC2NodeClass{}
+				g.Expect(guestClient.Get(ctx, crclient.ObjectKeyFromObject(dupNodeClass), nc)).To(Succeed())
+				subnetIDs := make([]string, 0, len(nc.Status.Subnets))
+				for _, s := range nc.Status.Subnets {
+					subnetIDs = append(subnetIDs, s.ID)
+				}
+				g.Expect(subnetIDs).To(ContainElement(dupSubnetID))
+			}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+
+			// Wait for the duplicate subnet to appear in the ConfigMap (karpenter-operator passes it through).
+			t.Logf("Waiting for duplicate subnet %s to appear in karpenter-subnets ConfigMap", dupSubnetID)
+			g.Eventually(func(g Gomega) {
+				cm := &corev1.ConfigMap{}
+				g.Expect(mgtClient.Get(ctx, crclient.ObjectKey{
+					Namespace: hcpNamespace,
+					Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+				}, cm)).To(Succeed())
+				var cmSubnetIDs []string
+				g.Expect(json.Unmarshal([]byte(cm.Data["subnetIDs"]), &cmSubnetIDs)).To(Succeed())
+				g.Expect(cmSubnetIDs).To(ContainElement(dupSubnetID),
+					"karpenter-operator should pass all subnets through, including duplicates")
+			}).WithTimeout(2 * time.Minute).WithPolling(5 * time.Second).Should(Succeed())
+			t.Logf("Duplicate subnet %s is in ConfigMap (expected — karpenter passes everything through)", dupSubnetID)
+
+			// Verify the duplicate subnet is NOT in any AWSEndpointService.Spec.SubnetIDs
+			// (hypershift-operator's AZ dedup filters it out at step 2).
+			t.Logf("Verifying duplicate subnet %s is NOT in AWSEndpointService.Spec.SubnetIDs (step 2 AZ dedup)", dupSubnetID)
+			g.Consistently(func(g Gomega) {
+				dupList := &hyperv1.AWSEndpointServiceList{}
+				g.Expect(mgtClient.List(ctx, dupList, crclient.InNamespace(hcpNamespace))).To(Succeed())
+				for _, es := range dupList.Items {
+					g.Expect(es.Spec.SubnetIDs).NotTo(ContainElement(dupSubnetID),
+						"AWSEndpointService %q should NOT contain duplicate subnet %s (AZ %s already covered)",
+						es.Name, dupSubnetID, occupiedAZ)
+				}
+			}).WithTimeout(30 * time.Second).WithPolling(5 * time.Second).Should(Succeed())
+			t.Logf("Confirmed: duplicate subnet %s correctly filtered from AWSEndpointService specs", dupSubnetID)
+
+			// Verify AWSEndpointAvailable is still True (no disruption).
+			t.Logf("Verifying AWSEndpointAvailable=True after duplicate subnet attempt")
+			dupCheckList := &hyperv1.AWSEndpointServiceList{}
+			g.Expect(mgtClient.List(ctx, dupCheckList, crclient.InNamespace(hcpNamespace))).To(Succeed())
+			for _, es := range dupCheckList.Items {
+				for _, cond := range es.Status.Conditions {
+					if cond.Type == string(hyperv1.AWSEndpointAvailable) {
+						g.Expect(cond.Status).To(Equal(metav1.ConditionTrue),
+							"AWSEndpointService %q should remain AWSEndpointAvailable=True", es.Name)
+					}
+				}
+			}
+			t.Logf("AWSEndpointAvailable=True confirmed after duplicate subnet test")
+
+			// Clean up duplicate NodeClass and subnet.
+			g.Expect(guestClient.Delete(ctx, dupNodeClass)).To(Succeed())
+			cleanupDupSubnet()
+			t.Logf("Cleaned up duplicate-AZ NodeClass and subnet")
+			// --- End dedup verification ---
+
 			// Create a small test subnet in the VPC.
 			subnetID, cleanupSubnet := e2eutil.CreateTestSubnet(ctx, t, ec2client, vpcID, az, hostedCluster.Spec.InfraID)
 			t.Logf("Created test subnet %s in AZ %s", subnetID, az)

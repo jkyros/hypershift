@@ -632,6 +632,166 @@ func TestEnqueueOnKarpenterConfigMapChange(t *testing.T) {
 	}
 }
 
+func TestReconcileAWSEndpointServiceSubnetIDs(t *testing.T) {
+	testCases := []struct {
+		name            string
+		clusterName     string
+		namespace       string
+		hcpNamespace    string
+		currentSubnets  []string
+		objects         []client.Object
+		describeResult  []ec2types.Subnet
+		expectedSubnets []string
+	}{
+		{
+			name:           "When a new subnet is in a new AZ it should be added",
+			clusterName:    "my-cluster",
+			namespace:      "clusters",
+			hcpNamespace:   "clusters-my-cluster",
+			currentSubnets: []string{"subnet-aaa"},
+			objects: []client.Object{
+				&hyperv1.NodePool{
+					ObjectMeta: metav1.ObjectMeta{Name: "np-1", Namespace: "clusters"},
+					Spec: hyperv1.NodePoolSpec{
+						ClusterName: "my-cluster",
+						Platform: hyperv1.NodePoolPlatform{
+							AWS: &hyperv1.AWSNodePoolPlatform{
+								Subnet: hyperv1.AWSResourceReference{ID: aws.String("subnet-aaa")},
+							},
+						},
+					},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+						Namespace: "clusters-my-cluster",
+					},
+					Data: map[string]string{
+						"subnetIDs": `["subnet-bbb"]`,
+					},
+				},
+			},
+			describeResult: []ec2types.Subnet{
+				{SubnetId: aws.String("subnet-aaa"), AvailabilityZone: aws.String("us-east-1a")},
+				{SubnetId: aws.String("subnet-bbb"), AvailabilityZone: aws.String("us-east-1b")},
+			},
+			expectedSubnets: []string{"subnet-aaa", "subnet-bbb"},
+		},
+		{
+			name:           "When a new subnet collides on AZ with an existing subnet it should be filtered out",
+			clusterName:    "my-cluster",
+			namespace:      "clusters",
+			hcpNamespace:   "clusters-my-cluster",
+			currentSubnets: []string{"subnet-aaa"},
+			objects: []client.Object{
+				&hyperv1.NodePool{
+					ObjectMeta: metav1.ObjectMeta{Name: "np-1", Namespace: "clusters"},
+					Spec: hyperv1.NodePoolSpec{
+						ClusterName: "my-cluster",
+						Platform: hyperv1.NodePoolPlatform{
+							AWS: &hyperv1.AWSNodePoolPlatform{
+								Subnet: hyperv1.AWSResourceReference{ID: aws.String("subnet-aaa")},
+							},
+						},
+					},
+				},
+				&corev1.ConfigMap{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      karpenterutil.KarpenterSubnetsConfigMapName,
+						Namespace: "clusters-my-cluster",
+					},
+					Data: map[string]string{
+						"subnetIDs": `["subnet-bbb"]`,
+					},
+				},
+			},
+			describeResult: []ec2types.Subnet{
+				{SubnetId: aws.String("subnet-aaa"), AvailabilityZone: aws.String("us-east-1a")},
+				{SubnetId: aws.String("subnet-bbb"), AvailabilityZone: aws.String("us-east-1a")},
+			},
+			expectedSubnets: []string{"subnet-aaa"},
+		},
+		{
+			name:           "When a subnet is removed it should be removed even if its AZ had a collision",
+			clusterName:    "my-cluster",
+			namespace:      "clusters",
+			hcpNamespace:   "clusters-my-cluster",
+			currentSubnets: []string{"subnet-aaa", "subnet-bbb"},
+			objects: []client.Object{
+				&hyperv1.NodePool{
+					ObjectMeta: metav1.ObjectMeta{Name: "np-1", Namespace: "clusters"},
+					Spec: hyperv1.NodePoolSpec{
+						ClusterName: "my-cluster",
+						Platform: hyperv1.NodePoolPlatform{
+							AWS: &hyperv1.AWSNodePoolPlatform{
+								Subnet: hyperv1.AWSResourceReference{ID: aws.String("subnet-aaa")},
+							},
+						},
+					},
+				},
+			},
+			expectedSubnets: []string{"subnet-aaa"},
+		},
+		{
+			name:           "When the desired list matches current it should not call DescribeSubnets",
+			clusterName:    "my-cluster",
+			namespace:      "clusters",
+			hcpNamespace:   "clusters-my-cluster",
+			currentSubnets: []string{"subnet-aaa"},
+			objects: []client.Object{
+				&hyperv1.NodePool{
+					ObjectMeta: metav1.ObjectMeta{Name: "np-1", Namespace: "clusters"},
+					Spec: hyperv1.NodePoolSpec{
+						ClusterName: "my-cluster",
+						Platform: hyperv1.NodePoolPlatform{
+							AWS: &hyperv1.AWSNodePoolPlatform{
+								Subnet: hyperv1.AWSResourceReference{ID: aws.String("subnet-aaa")},
+							},
+						},
+					},
+				},
+			},
+			// describeResult not set — mock won't expect a call
+			expectedSubnets: []string{"subnet-aaa"},
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			g := NewWithT(t)
+			mockCtrl := gomock.NewController(t)
+
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(hyperapi.Scheme).
+				WithObjects(tc.objects...).
+				Build()
+
+			mockEC2 := awsapi.NewMockEC2API(mockCtrl)
+			if tc.describeResult != nil {
+				mockEC2.EXPECT().DescribeSubnets(gomock.Any(), gomock.Any()).
+					Return(&ec2.DescribeSubnetsOutput{Subnets: tc.describeResult}, nil)
+			}
+
+			awsES := &hyperv1.AWSEndpointService{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: tc.hcpNamespace,
+				},
+				Spec: hyperv1.AWSEndpointServiceSpec{
+					SubnetIDs: tc.currentSubnets,
+				},
+			}
+			hc := &hyperv1.HostedCluster{
+				ObjectMeta: metav1.ObjectMeta{Name: tc.clusterName, Namespace: tc.namespace},
+			}
+
+			ctx := ctrl.LoggerInto(context.Background(), testr.New(t))
+			err := reconcileAWSEndpointServiceSubnetIDs(ctx, fakeClient, mockEC2, awsES, hc)
+			g.Expect(err).NotTo(HaveOccurred())
+			g.Expect(awsES.Spec.SubnetIDs).To(ConsistOf(tc.expectedSubnets))
+		})
+	}
+}
+
 // fakeManager implements just enough of ctrl.Manager for tests that need mgr.GetLogger().
 // All unimplemented methods are delegated to the embedded nil Manager, which will
 // panic if called — intentionally, as tests should never trigger those paths.
