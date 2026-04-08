@@ -1,0 +1,193 @@
+package v1
+
+import (
+	"encoding/json"
+	"reflect"
+	"strings"
+
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+)
+
+// kubeletConfigKnownFields is the set of JSON keys corresponding to the explicitly typed
+// fields in KubeletConfiguration. It is derived from the struct's json tags at init time
+// so it stays in sync automatically when fields are added or removed.
+var kubeletConfigKnownFields map[string]struct{}
+
+func init() {
+	t := reflect.TypeOf(KubeletConfiguration{})
+	kubeletConfigKnownFields = make(map[string]struct{}, t.NumField())
+	for i := range t.NumField() {
+		f := t.Field(i)
+		if tag, ok := f.Tag.Lookup("json"); ok {
+			name, _, _ := strings.Cut(tag, ",")
+			if name != "" && name != "-" {
+				kubeletConfigKnownFields[name] = struct{}{}
+			}
+		}
+	}
+}
+
+// KubeletConfiguration configures kubelet settings for nodes provisioned by this NodeClass.
+// These settings are injected into the node's ignition configuration via MachineConfig.
+// The fields listed below are validated at admission time. Additional kubelet configuration
+// fields beyond those listed here are also accepted and will be passed through to the node's
+// kubelet configuration without validation.
+// +kubebuilder:pruning:PreserveUnknownFields
+// +kubebuilder:validation:XValidation:rule="!has(self.imageGCHighThresholdPercent) || !has(self.imageGCLowThresholdPercent) || self.imageGCHighThresholdPercent > self.imageGCLowThresholdPercent",message="imageGCHighThresholdPercent must be greater than imageGCLowThresholdPercent"
+type KubeletConfiguration struct {
+	// maxPods is the maximum number of pods that can run on a node.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	MaxPods *int32 `json:"maxPods,omitempty"`
+	// podsPerCore is the maximum number of pods per core. Cannot exceed maxPods.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	PodsPerCore *int32 `json:"podsPerCore,omitempty"`
+	// systemReserved is a set of ResourceName=ResourceQuantity pairs that describe
+	// resources reserved for non-kubernetes components.
+	// Currently only cpu, memory, ephemeral-storage, and pid are supported.
+	// +kubebuilder:validation:XValidation:message="valid keys for systemReserved are ['cpu','memory','ephemeral-storage','pid']",rule="self.all(x, x=='cpu' || x=='memory' || x=='ephemeral-storage' || x=='pid')"
+	// +kubebuilder:validation:XValidation:message="systemReserved value cannot be a negative resource quantity",rule="self.all(x, !self[x].startsWith('-'))"
+	// +kubebuilder:validation:MinProperties=1
+	// +optional
+	SystemReserved map[string]string `json:"systemReserved,omitempty"`
+	// kubeReserved is a set of ResourceName=ResourceQuantity pairs that describe
+	// resources reserved for kubernetes system components.
+	// Currently only cpu, memory, ephemeral-storage, and pid are supported.
+	// +kubebuilder:validation:XValidation:message="valid keys for kubeReserved are ['cpu','memory','ephemeral-storage','pid']",rule="self.all(x, x=='cpu' || x=='memory' || x=='ephemeral-storage' || x=='pid')"
+	// +kubebuilder:validation:XValidation:message="kubeReserved value cannot be a negative resource quantity",rule="self.all(x, !self[x].startsWith('-'))"
+	// +kubebuilder:validation:MinProperties=1
+	// +optional
+	KubeReserved map[string]string `json:"kubeReserved,omitempty"`
+	// evictionHard is a map of signal names to quantities that defines hard eviction thresholds.
+	// +kubebuilder:validation:XValidation:message="valid keys for evictionHard are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']",rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])"
+	// +kubebuilder:validation:MinProperties=1
+	// +optional
+	EvictionHard map[string]string `json:"evictionHard,omitempty"`
+	// evictionSoft is a map of signal names to quantities that defines soft eviction thresholds.
+	// +kubebuilder:validation:XValidation:message="valid keys for evictionSoft are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']",rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])"
+	// +kubebuilder:validation:MinProperties=1
+	// +optional
+	EvictionSoft map[string]string `json:"evictionSoft,omitempty"`
+	// evictionSoftGracePeriod is a map of signal names to quantities that defines grace periods
+	// for each soft eviction signal.
+	// +kubebuilder:validation:XValidation:message="valid keys for evictionSoftGracePeriod are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']",rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])"
+	// +kubebuilder:validation:MinProperties=1
+	// +optional
+	EvictionSoftGracePeriod map[string]metav1.Duration `json:"evictionSoftGracePeriod,omitempty"`
+	// evictionMaxPodGracePeriod is the maximum allowed grace period (in seconds) to use
+	// when terminating pods in response to soft eviction thresholds.
+	// +optional
+	EvictionMaxPodGracePeriod *int32 `json:"evictionMaxPodGracePeriod,omitempty"`
+	// imageGCHighThresholdPercent is the percent of disk usage which triggers image garbage collection.
+	// The value must be between 0 and 100, inclusive, and must be greater than imageGCLowThresholdPercent when both are set.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	ImageGCHighThresholdPercent *int32 `json:"imageGCHighThresholdPercent,omitempty"`
+	// imageGCLowThresholdPercent is the percent of disk usage to which image garbage collection attempts to free.
+	// The value must be between 0 and 100, inclusive, and must be less than imageGCHighThresholdPercent when both are set.
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=100
+	// +optional
+	ImageGCLowThresholdPercent *int32 `json:"imageGCLowThresholdPercent,omitempty"`
+	// cpuCFSQuota enables CPU CFS quota enforcement for containers that specify CPU limits.
+	// +optional
+	CPUCFSQuota *bool `json:"cpuCFSQuota,omitempty"`
+
+	// Overflow holds additional kubelet configuration fields not explicitly defined above.
+	// These fields are preserved during serialization and deserialization, allowing arbitrary
+	// kubelet configuration to pass through to the node's ignition/MachineConfig.
+	Overflow runtime.RawExtension `json:"-"`
+}
+
+// UnmarshalJSON implements custom JSON unmarshaling for KubeletConfiguration.
+// It deserializes known fields into the struct and captures all additional fields
+// into the overflow map for pass-through.
+func (k *KubeletConfiguration) UnmarshalJSON(data []byte) error {
+	// Zero the receiver so that fields absent from the new input
+	// (including Overflow, which is json:"-") do not survive from a
+	// previous decode.
+	*k = KubeletConfiguration{}
+
+	// Unmarshal known fields via alias to avoid infinite recursion
+	type Alias KubeletConfiguration
+	aux := &struct{ *Alias }{Alias: (*Alias)(k)}
+	if err := json.Unmarshal(data, aux); err != nil {
+		return err
+	}
+
+	// Unmarshal everything into a raw map
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	// Separate unknown fields into overflow
+	for key := range kubeletConfigKnownFields {
+		delete(raw, key)
+	}
+	if len(raw) > 0 {
+		overflowBytes, err := json.Marshal(raw)
+		if err != nil {
+			return err
+		}
+		k.Overflow = runtime.RawExtension{Raw: overflowBytes}
+	}
+	return nil
+}
+
+// MarshalJSON implements custom JSON marshaling for KubeletConfiguration.
+// It serializes the known typed fields and merges any overflow fields back in.
+func (k KubeletConfiguration) MarshalJSON() ([]byte, error) {
+	// Marshal known fields via alias to avoid infinite recursion
+	type Alias KubeletConfiguration
+	data, err := json.Marshal((*Alias)(&k))
+	if err != nil {
+		return nil, err
+	}
+
+	if len(k.Overflow.Raw) == 0 {
+		return data, nil
+	}
+
+	// Merge overflow fields into the output
+	var base map[string]json.RawMessage
+	if err := json.Unmarshal(data, &base); err != nil {
+		return nil, err
+	}
+	var overflowMap map[string]json.RawMessage
+	if err := json.Unmarshal(k.Overflow.Raw, &overflowMap); err != nil {
+		return nil, err
+	}
+	for key, val := range overflowMap {
+		base[key] = val
+	}
+	return json.Marshal(base)
+}
+
+// HasTypedFields reports whether any explicitly defined struct fields are set.
+// This is used by IsZero, but is separate so we can differentiate the zero case
+// from "only overflow fields set". This must be kept in sync with the typed
+// fields in KubeletConfiguration.
+func (k KubeletConfiguration) HasTypedFields() bool {
+	return k.MaxPods != nil ||
+		k.PodsPerCore != nil ||
+		k.SystemReserved != nil ||
+		k.KubeReserved != nil ||
+		k.EvictionHard != nil ||
+		k.EvictionSoft != nil ||
+		k.EvictionSoftGracePeriod != nil ||
+		k.EvictionMaxPodGracePeriod != nil ||
+		k.ImageGCHighThresholdPercent != nil ||
+		k.ImageGCLowThresholdPercent != nil ||
+		k.CPUCFSQuota != nil
+}
+
+// IsZero reports whether the KubeletConfiguration is empty (no typed fields set and
+// no overflow fields). This is used by the omitzero JSON tag to determine whether the
+// field should be omitted during serialization.
+func (k KubeletConfiguration) IsZero() bool {
+	return !k.HasTypedFields() && len(k.Overflow.Raw) == 0
+}

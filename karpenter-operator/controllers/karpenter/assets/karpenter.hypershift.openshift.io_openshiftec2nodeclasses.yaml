@@ -258,6 +258,117 @@ spec:
                 - Public
                 - SubnetDefault
                 type: string
+              kubelet:
+                description: |-
+                  kubelet configures kubelet settings for nodes provisioned by this NodeClass.
+                  These settings are injected into the node's ignition configuration via MachineConfig.
+                properties:
+                  cpuCFSQuota:
+                    description: cpuCFSQuota enables CPU CFS quota enforcement for
+                      containers that specify CPU limits.
+                    type: boolean
+                  evictionHard:
+                    additionalProperties:
+                      type: string
+                    description: evictionHard is a map of signal names to quantities
+                      that defines hard eviction thresholds.
+                    minProperties: 1
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for evictionHard are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']
+                      rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                  evictionMaxPodGracePeriod:
+                    description: |-
+                      evictionMaxPodGracePeriod is the maximum allowed grace period (in seconds) to use
+                      when terminating pods in response to soft eviction thresholds.
+                    format: int32
+                    type: integer
+                  evictionSoft:
+                    additionalProperties:
+                      type: string
+                    description: evictionSoft is a map of signal names to quantities
+                      that defines soft eviction thresholds.
+                    minProperties: 1
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for evictionSoft are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']
+                      rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                  evictionSoftGracePeriod:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      evictionSoftGracePeriod is a map of signal names to quantities that defines grace periods
+                      for each soft eviction signal.
+                    minProperties: 1
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for evictionSoftGracePeriod are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']
+                      rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                  imageGCHighThresholdPercent:
+                    description: |-
+                      imageGCHighThresholdPercent is the percent of disk usage which triggers image garbage collection.
+                      The value must be between 0 and 100, inclusive, and must be greater than imageGCLowThresholdPercent when both are set.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  imageGCLowThresholdPercent:
+                    description: |-
+                      imageGCLowThresholdPercent is the percent of disk usage to which image garbage collection attempts to free.
+                      The value must be between 0 and 100, inclusive, and must be less than imageGCHighThresholdPercent when both are set.
+                    format: int32
+                    maximum: 100
+                    minimum: 0
+                    type: integer
+                  kubeReserved:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      kubeReserved is a set of ResourceName=ResourceQuantity pairs that describe
+                      resources reserved for kubernetes system components.
+                      Currently only cpu, memory, ephemeral-storage, and pid are supported.
+                    minProperties: 1
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for kubeReserved are ['cpu','memory','ephemeral-storage','pid']
+                      rule: self.all(x, x=='cpu' || x=='memory' || x=='ephemeral-storage'
+                        || x=='pid')
+                    - message: kubeReserved value cannot be a negative resource quantity
+                      rule: self.all(x, !self[x].startsWith('-'))
+                  maxPods:
+                    description: maxPods is the maximum number of pods that can run
+                      on a node.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  podsPerCore:
+                    description: podsPerCore is the maximum number of pods per core.
+                      Cannot exceed maxPods.
+                    format: int32
+                    minimum: 0
+                    type: integer
+                  systemReserved:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      systemReserved is a set of ResourceName=ResourceQuantity pairs that describe
+                      resources reserved for non-kubernetes components.
+                      Currently only cpu, memory, ephemeral-storage, and pid are supported.
+                    minProperties: 1
+                    type: object
+                    x-kubernetes-validations:
+                    - message: valid keys for systemReserved are ['cpu','memory','ephemeral-storage','pid']
+                      rule: self.all(x, x=='cpu' || x=='memory' || x=='ephemeral-storage'
+                        || x=='pid')
+                    - message: systemReserved value cannot be a negative resource
+                        quantity
+                      rule: self.all(x, !self[x].startsWith('-'))
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+                x-kubernetes-validations:
+                - message: imageGCHighThresholdPercent must be greater than imageGCLowThresholdPercent
+                  rule: '!has(self.imageGCHighThresholdPercent) || !has(self.imageGCLowThresholdPercent)
+                    || self.imageGCHighThresholdPercent > self.imageGCLowThresholdPercent'
               metadataOptions:
                 description: |-
                   metadataOptions contains parameters for specifying the exposure of the

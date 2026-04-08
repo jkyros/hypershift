@@ -157,6 +157,25 @@ func volumeTypeToKarpenter(vt hyperkarpenterv1.VolumeType) *string {
 	return &v
 }
 
+func karpenterKubeletConfigurationFromNodeClassSpec(spec hyperkarpenterv1.OpenshiftEC2NodeClassSpec) *awskarpenterv1.KubeletConfiguration {
+	if !spec.Kubelet.HasTypedFields() {
+		return nil
+	}
+	return &awskarpenterv1.KubeletConfiguration{
+		ImageGCHighThresholdPercent: spec.Kubelet.ImageGCHighThresholdPercent,
+		ImageGCLowThresholdPercent:  spec.Kubelet.ImageGCLowThresholdPercent,
+		MaxPods:                     spec.Kubelet.MaxPods,
+		CPUCFSQuota:                 spec.Kubelet.CPUCFSQuota,
+		EvictionHard:                spec.Kubelet.EvictionHard,
+		EvictionSoft:                spec.Kubelet.EvictionSoft,
+		EvictionSoftGracePeriod:     spec.Kubelet.EvictionSoftGracePeriod,
+		EvictionMaxPodGracePeriod:   spec.Kubelet.EvictionMaxPodGracePeriod,
+		PodsPerCore:                 spec.Kubelet.PodsPerCore,
+		SystemReserved:              spec.Kubelet.SystemReserved,
+		KubeReserved:                spec.Kubelet.KubeReserved,
+	}
+}
+
 func ptrIfNonEmpty(s string) *string {
 	if s == "" {
 		return nil
