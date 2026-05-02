@@ -336,16 +336,20 @@ spec:
                     - message: kubeReserved value cannot be a negative resource quantity
                       rule: self.all(x, !self[x].startsWith('-'))
                   maxPods:
-                    description: maxPods is the maximum number of pods that can run
-                      on a node.
+                    description: |-
+                      maxPods is the maximum number of pods that can run on a node.
+                      The value must be between 1 and 2500, inclusive.
                     format: int32
-                    minimum: 0
+                    maximum: 2500
+                    minimum: 1
                     type: integer
                   podsPerCore:
-                    description: podsPerCore is the maximum number of pods per core.
-                      Cannot exceed maxPods.
+                    description: |-
+                      podsPerCore is the maximum number of pods per core. The value must be between 1 and 2500,
+                      inclusive, and cannot exceed maxPods when both are set.
                     format: int32
-                    minimum: 0
+                    maximum: 2500
+                    minimum: 1
                     type: integer
                   systemReserved:
                     additionalProperties:
@@ -369,6 +373,9 @@ spec:
                 - message: imageGCHighThresholdPercent must be greater than imageGCLowThresholdPercent
                   rule: '!has(self.imageGCHighThresholdPercent) || !has(self.imageGCLowThresholdPercent)
                     || self.imageGCHighThresholdPercent > self.imageGCLowThresholdPercent'
+                - message: podsPerCore must not exceed maxPods
+                  rule: '!has(self.podsPerCore) || !has(self.maxPods) || self.podsPerCore
+                    <= self.maxPods'
               metadataOptions:
                 description: |-
                   metadataOptions contains parameters for specifying the exposure of the

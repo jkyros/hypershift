@@ -18,23 +18,23 @@ limitations under the License.
 package v1
 
 import (
-	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
 // KubeletConfigurationApplyConfiguration represents a declarative configuration of the KubeletConfiguration type for use
 // with apply.
 type KubeletConfigurationApplyConfiguration struct {
-	MaxPods                     *int32                 `json:"maxPods,omitempty"`
-	PodsPerCore                 *int32                 `json:"podsPerCore,omitempty"`
-	SystemReserved              map[string]string      `json:"systemReserved,omitempty"`
-	KubeReserved                map[string]string      `json:"kubeReserved,omitempty"`
-	EvictionHard                map[string]string      `json:"evictionHard,omitempty"`
-	EvictionSoft                map[string]string      `json:"evictionSoft,omitempty"`
-	EvictionSoftGracePeriod     map[string]v1.Duration `json:"evictionSoftGracePeriod,omitempty"`
-	EvictionMaxPodGracePeriod   *int32                 `json:"evictionMaxPodGracePeriod,omitempty"`
-	ImageGCHighThresholdPercent *int32                 `json:"imageGCHighThresholdPercent,omitempty"`
-	ImageGCLowThresholdPercent  *int32                 `json:"imageGCLowThresholdPercent,omitempty"`
-	CPUCFSQuota                 *bool                  `json:"cpuCFSQuota,omitempty"`
+	MaxPods                     *int32                     `json:"maxPods,omitempty"`
+	PodsPerCore                 *int32                     `json:"podsPerCore,omitempty"`
+	SystemReserved              map[string]string          `json:"systemReserved,omitempty"`
+	KubeReserved                map[string]string          `json:"kubeReserved,omitempty"`
+	EvictionHard                map[string]string          `json:"evictionHard,omitempty"`
+	EvictionSoft                map[string]string          `json:"evictionSoft,omitempty"`
+	EvictionSoftGracePeriod     map[string]metav1.Duration `json:"evictionSoftGracePeriod,omitempty"`
+	EvictionMaxPodGracePeriod   *int32                     `json:"evictionMaxPodGracePeriod,omitempty"`
+	ImageGCHighThresholdPercent *int32                     `json:"imageGCHighThresholdPercent,omitempty"`
+	ImageGCLowThresholdPercent  *int32                     `json:"imageGCLowThresholdPercent,omitempty"`
+	CPUCFSQuota                 *bool                      `json:"cpuCFSQuota,omitempty"`
 }
 
 // KubeletConfigurationApplyConfiguration constructs a declarative configuration of the KubeletConfiguration type for use with
@@ -119,9 +119,9 @@ func (b *KubeletConfigurationApplyConfiguration) WithEvictionSoft(entries map[st
 // and returns the receiver, so that objects can be build by chaining "With" function invocations.
 // If called multiple times, the entries provided by each call will be put on the EvictionSoftGracePeriod field,
 // overwriting an existing map entries in EvictionSoftGracePeriod field with the same key.
-func (b *KubeletConfigurationApplyConfiguration) WithEvictionSoftGracePeriod(entries map[string]v1.Duration) *KubeletConfigurationApplyConfiguration {
+func (b *KubeletConfigurationApplyConfiguration) WithEvictionSoftGracePeriod(entries map[string]metav1.Duration) *KubeletConfigurationApplyConfiguration {
 	if b.EvictionSoftGracePeriod == nil && len(entries) > 0 {
-		b.EvictionSoftGracePeriod = make(map[string]v1.Duration, len(entries))
+		b.EvictionSoftGracePeriod = make(map[string]metav1.Duration, len(entries))
 	}
 	for k, v := range entries {
 		b.EvictionSoftGracePeriod[k] = v

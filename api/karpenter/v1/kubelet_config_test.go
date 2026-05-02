@@ -18,8 +18,8 @@ func TestKubeletConfigurationMarshalRoundTrip(t *testing.T) {
 		{
 			name: "When all typed fields are set they should round-trip",
 			config: KubeletConfiguration{
-				MaxPods:     ptr.To(int32(110)),
-				PodsPerCore: ptr.To(int32(10)),
+				MaxPods:     110,
+				PodsPerCore: 10,
 				SystemReserved: map[string]string{
 					"cpu":    "100m",
 					"memory": "256Mi",
@@ -46,7 +46,7 @@ func TestKubeletConfigurationMarshalRoundTrip(t *testing.T) {
 		{
 			name: "When only some fields are set they should round-trip",
 			config: KubeletConfiguration{
-				MaxPods:     ptr.To(int32(50)),
+				MaxPods:     50,
 				CPUCFSQuota: ptr.To(false),
 			},
 		},
@@ -87,7 +87,7 @@ func TestKubeletConfigurationOverflowPreservation(t *testing.T) {
 		}
 
 		// Typed field should be populated
-		if config.MaxPods == nil || *config.MaxPods != 110 {
+		if config.MaxPods != 110 {
 			t.Errorf("expected MaxPods=110, got %v", config.MaxPods)
 		}
 
@@ -139,9 +139,38 @@ func TestKubeletConfigurationOverflowPreservation(t *testing.T) {
 		}
 	})
 
+	t.Run("When a structured field conflicts with an overflow field the structured field should win", func(t *testing.T) {
+		input := `{"maxPods": 110, "registryPullQPS": 5}`
+		var config KubeletConfiguration
+		if err := json.Unmarshal([]byte(input), &config); err != nil {
+			t.Fatalf("failed to unmarshal: %v", err)
+		}
+
+		// Simulate a stale overflow that still contains maxPods from a prior serialization
+		config.Overflow.Raw = []byte(`{"maxPods": 999, "registryPullQPS": 5}`)
+		config.MaxPods = 42
+
+		data, err := json.Marshal(config)
+		if err != nil {
+			t.Fatalf("failed to marshal: %v", err)
+		}
+
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(data, &raw); err != nil {
+			t.Fatalf("failed to unmarshal to raw map: %v", err)
+		}
+
+		if string(raw["maxPods"]) != "42" {
+			t.Errorf("expected structured maxPods=42 to win, got %s", raw["maxPods"])
+		}
+		if _, ok := raw["registryPullQPS"]; !ok {
+			t.Error("expected overflow field registryPullQPS to still be present")
+		}
+	})
+
 	t.Run("When there are no overflow fields the output should contain only typed fields", func(t *testing.T) {
 		config := KubeletConfiguration{
-			MaxPods: ptr.To(int32(110)),
+			MaxPods: 110,
 		}
 
 		data, err := json.Marshal(config)
@@ -172,14 +201,14 @@ func TestKubeletConfigurationDeepCopy(t *testing.T) {
 		copied := original.DeepCopy()
 
 		// Verify typed fields are copied
-		if copied.MaxPods == nil || *copied.MaxPods != 110 {
+		if copied.MaxPods != 110 {
 			t.Errorf("expected MaxPods=110, got %v", copied.MaxPods)
 		}
 
 		// Verify overflow is independent (modifying copy shouldn't affect original)
-		*copied.MaxPods = 200
+		copied.MaxPods = 200
 
-		if *original.MaxPods != 110 {
+		if original.MaxPods != 110 {
 			t.Error("modifying copy affected original MaxPods")
 		}
 

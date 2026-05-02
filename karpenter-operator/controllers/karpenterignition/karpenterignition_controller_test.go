@@ -1168,7 +1168,7 @@ func TestReconcileKubeletConfigMapOrphanCleanup(t *testing.T) {
 	}
 
 	kubeletConfig := hyperkarpenterv1.KubeletConfiguration{
-		MaxPods: ptr.To[int32](500),
+		MaxPods: 500,
 	}
 
 	t.Run("When spec.kubelet is set it should add the finalizer and create the ConfigMap", func(t *testing.T) {
@@ -1443,7 +1443,7 @@ kind: Config`),
 			ObjectMeta: metav1.ObjectMeta{Name: testNodeClassName},
 			Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				Kubelet: hyperkarpenterv1.KubeletConfiguration{
-					MaxPods: ptr.To[int32](500),
+					MaxPods: 500,
 				},
 			},
 		}
@@ -1750,14 +1750,13 @@ func TestCreateInMemoryNodePool(t *testing.T) {
 
 	t.Run("When kubelet config is set it should include only the per-nodeclass kubelet config ref", func(t *testing.T) {
 		g := NewWithT(t)
-		maxPods := int32(500)
 		nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: testNodeClassName,
 			},
 			Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				Kubelet: hyperkarpenterv1.KubeletConfiguration{
-					MaxPods: &maxPods,
+					MaxPods: 500,
 				},
 			},
 		}
@@ -1844,12 +1843,11 @@ func TestReconcileKubeletConfigMap(t *testing.T) {
 				Namespace: testNamespace,
 			},
 		}
-		maxPods := int32(500)
 		nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
 			ObjectMeta: metav1.ObjectMeta{Name: testNodeClassName},
 			Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				Kubelet: hyperkarpenterv1.KubeletConfiguration{
-					MaxPods: &maxPods,
+					MaxPods: 500,
 				},
 			},
 		}
@@ -2002,12 +2000,11 @@ func TestReconcileKubeletConfigMap(t *testing.T) {
 				Namespace: testNamespace,
 			},
 		}
-		newMaxPods := int32(250)
 		nodeClass := &hyperkarpenterv1.OpenshiftEC2NodeClass{
 			ObjectMeta: metav1.ObjectMeta{Name: testNodeClassName},
 			Spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				Kubelet: hyperkarpenterv1.KubeletConfiguration{
-					MaxPods: &newMaxPods,
+					MaxPods: 250,
 				},
 			},
 		}

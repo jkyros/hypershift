@@ -5,9 +5,9 @@ import (
 	"testing"
 	"time"
 
-	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
-
 	hyperkarpenterv1 "github.com/openshift/hypershift/api/karpenter/v1"
+
+	awskarpenterv1 "github.com/aws/karpenter-provider-aws/pkg/apis/v1"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -29,8 +29,8 @@ func TestKarpenterKubeletConfigurationFromNodeClassSpec(t *testing.T) {
 			name: "When all karpenter-mapped fields are set it should map them",
 			spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				Kubelet: hyperkarpenterv1.KubeletConfiguration{
-					MaxPods:     ptr.To(int32(110)),
-					PodsPerCore: ptr.To(int32(10)),
+					MaxPods:     110,
+					PodsPerCore: 10,
 					SystemReserved: map[string]string{
 						"cpu":    "100m",
 						"memory": "256Mi",
@@ -84,7 +84,7 @@ func TestKarpenterKubeletConfigurationFromNodeClassSpec(t *testing.T) {
 			name: "When only some fields are set it should map only those",
 			spec: hyperkarpenterv1.OpenshiftEC2NodeClassSpec{
 				Kubelet: hyperkarpenterv1.KubeletConfiguration{
-					MaxPods: ptr.To(int32(50)),
+					MaxPods: 50,
 				},
 			},
 			expected: &awskarpenterv1.KubeletConfiguration{

@@ -164,13 +164,13 @@ func karpenterKubeletConfigurationFromNodeClassSpec(spec hyperkarpenterv1.Opensh
 	return &awskarpenterv1.KubeletConfiguration{
 		ImageGCHighThresholdPercent: spec.Kubelet.ImageGCHighThresholdPercent,
 		ImageGCLowThresholdPercent:  spec.Kubelet.ImageGCLowThresholdPercent,
-		MaxPods:                     spec.Kubelet.MaxPods,
+		MaxPods:                     ptrIfNonZero(spec.Kubelet.MaxPods),
 		CPUCFSQuota:                 spec.Kubelet.CPUCFSQuota,
 		EvictionHard:                spec.Kubelet.EvictionHard,
 		EvictionSoft:                spec.Kubelet.EvictionSoft,
 		EvictionSoftGracePeriod:     spec.Kubelet.EvictionSoftGracePeriod,
 		EvictionMaxPodGracePeriod:   spec.Kubelet.EvictionMaxPodGracePeriod,
-		PodsPerCore:                 spec.Kubelet.PodsPerCore,
+		PodsPerCore:                 ptrIfNonZero(spec.Kubelet.PodsPerCore),
 		SystemReserved:              spec.Kubelet.SystemReserved,
 		KubeReserved:                spec.Kubelet.KubeReserved,
 	}
@@ -181,4 +181,11 @@ func ptrIfNonEmpty(s string) *string {
 		return nil
 	}
 	return &s
+}
+
+func ptrIfNonZero(v int32) *int32 {
+	if v == 0 {
+		return nil
+	}
+	return ptr.To(v)
 }
