@@ -55,6 +55,29 @@ To avoid introducing new dependencies, do not add utils or methods to the API ty
 
 - **Ratcheting validation**: when adding new validation to existing fields, verify that existing clusters with values that predate the new validation can still be updated. CRD validation ratchets (allows unchanged invalid values through), but only for fields that are literally unchanged in the update.
 
+### KubeletConfiguration Field Graduation (Karpenter)
+
+The `KubeletConfiguration` type in `api/karpenter/v1/kubelet_config.go` accepts arbitrary kubelet
+configuration fields via a `PreserveUnknownFields` schema and a `runtime.RawExtension` overflow
+mechanism. A subset of these fields are promoted to explicitly typed struct fields with CEL validation.
+
+When graduating a field from overflow to a typed struct field:
+
+- **Match upstream Karpenter's field name and JSON tag exactly.** Our structured fields must use the
+  same `json:"..."` tag as `github.com/aws/karpenter-provider-aws/pkg/apis/v1.KubeletConfiguration`.
+  Changing a field name would be a breaking API change requiring a new API version, because existing
+  serialized data (and user-supplied YAML) uses the upstream name.
+- **Match upstream Karpenter's Go type.** Use the same Go type (pointer vs value, map key/value types)
+  as upstream to keep the mapping in `karpenterKubeletConfigurationFromNodeClassSpec()` trivial and
+  avoid serialization incompatibilities. Minor differences (e.g., bare `int32` vs `*int32`) are
+  acceptable only when they don't change the JSON representation.
+- **Add stricter CEL validation as needed.** Admission-time validation does not affect serialization
+  compatibility. We can add constraints beyond what upstream provides (e.g., `Minimum=1` instead of
+  `Minimum=0`, cross-field rules like `imageGCHigh > imageGCLow`) without breaking the API.
+- **Do not rename fields for OpenShift conventions.** Normally OpenShift API conventions may prefer
+  different naming. For KubeletConfiguration fields, upstream compatibility takes precedence over
+  convention to avoid breaking changes.
+
 ## API Type Change Guidelines
 
 ### N-1 and N+1 Compatibility

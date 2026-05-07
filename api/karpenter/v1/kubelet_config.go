@@ -33,6 +33,9 @@ func init() {
 // The fields listed below are validated at admission time. Additional kubelet configuration
 // fields beyond those listed here are also accepted and will be passed through to the node's
 // kubelet configuration without validation.
+// When graduating new fields from overflow to typed fields, match upstream Karpenter's
+// field names and types exactly. See api/AGENTS.md "KubeletConfiguration Field Graduation"
+// for the full strategy.
 // +kubebuilder:pruning:PreserveUnknownFields
 // +kubebuilder:validation:XValidation:rule="!has(self.imageGCHighThresholdPercent) || !has(self.imageGCLowThresholdPercent) || self.imageGCHighThresholdPercent > self.imageGCLowThresholdPercent",message="imageGCHighThresholdPercent must be greater than imageGCLowThresholdPercent"
 // +kubebuilder:validation:XValidation:rule="!has(self.podsPerCore) || !has(self.maxPods) || self.podsPerCore <= self.maxPods",message="podsPerCore must not exceed maxPods"
