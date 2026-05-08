@@ -267,6 +267,21 @@ tests:
             cpu: "-100m"
     expectedError: "cannot be a negative resource quantity"
 
+  - name: When kubelet systemReserved has an empty value it should fail
+    initial: |
+      apiVersion: karpenter.hypershift.openshift.io/v1
+      kind: OpenshiftEC2NodeClass
+      spec:
+        subnetSelectorTerms:
+        - tags:
+            env: test
+        securityGroupSelectorTerms:
+        - id: sg-0123456789abcdef0
+        kubelet:
+          systemReserved:
+            cpu: ""
+    expectedError: "systemReserved values must not be empty"
+
   - name: When kubelet systemReserved is empty it should fail
     initial: |
       apiVersion: karpenter.hypershift.openshift.io/v1
@@ -327,6 +342,21 @@ tests:
             memory: "-512Mi"
     expectedError: "cannot be a negative resource quantity"
 
+  - name: When kubelet kubeReserved has an empty value it should fail
+    initial: |
+      apiVersion: karpenter.hypershift.openshift.io/v1
+      kind: OpenshiftEC2NodeClass
+      spec:
+        subnetSelectorTerms:
+        - tags:
+            env: test
+        securityGroupSelectorTerms:
+        - id: sg-0123456789abcdef0
+        kubelet:
+          kubeReserved:
+            memory: ""
+    expectedError: "kubeReserved values must not be empty"
+
   # --- evictionHard validation ---
   - name: When kubelet evictionHard has valid keys it should pass
     initial: |
@@ -358,6 +388,21 @@ tests:
             disk.pressure: "10%"
     expectedError: "valid keys for evictionHard"
 
+  - name: When kubelet evictionHard has an empty value it should fail
+    initial: |
+      apiVersion: karpenter.hypershift.openshift.io/v1
+      kind: OpenshiftEC2NodeClass
+      spec:
+        subnetSelectorTerms:
+        - tags:
+            env: test
+        securityGroupSelectorTerms:
+        - id: sg-0123456789abcdef0
+        kubelet:
+          evictionHard:
+            memory.available: ""
+    expectedError: "evictionHard values must not be empty"
+
   # --- evictionSoft validation ---
   - name: When kubelet evictionSoft has valid keys it should pass
     initial: |
@@ -388,6 +433,21 @@ tests:
           evictionSoft:
             cpu.pressure: "50%"
     expectedError: "valid keys for evictionSoft"
+
+  - name: When kubelet evictionSoft has an empty value it should fail
+    initial: |
+      apiVersion: karpenter.hypershift.openshift.io/v1
+      kind: OpenshiftEC2NodeClass
+      spec:
+        subnetSelectorTerms:
+        - tags:
+            env: test
+        securityGroupSelectorTerms:
+        - id: sg-0123456789abcdef0
+        kubelet:
+          evictionSoft:
+            memory.available: ""
+    expectedError: "evictionSoft values must not be empty"
 
   # --- evictionSoftGracePeriod validation ---
   - name: When kubelet evictionSoftGracePeriod has valid keys it should pass

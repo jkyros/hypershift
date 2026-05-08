@@ -277,6 +277,8 @@ spec:
                     x-kubernetes-validations:
                     - message: valid keys for evictionHard are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']
                       rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                    - message: evictionHard values must not be empty
+                      rule: self.all(x, self[x].size() > 0)
                   evictionMaxPodGracePeriod:
                     description: |-
                       evictionMaxPodGracePeriod is the maximum allowed grace period (in seconds) to use
@@ -293,6 +295,8 @@ spec:
                     x-kubernetes-validations:
                     - message: valid keys for evictionSoft are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']
                       rule: self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])
+                    - message: evictionSoft values must not be empty
+                      rule: self.all(x, self[x].size() > 0)
                   evictionSoftGracePeriod:
                     additionalProperties:
                       type: string
@@ -335,6 +339,8 @@ spec:
                         || x=='pid')
                     - message: kubeReserved value cannot be a negative resource quantity
                       rule: self.all(x, !self[x].startsWith('-'))
+                    - message: kubeReserved values must not be empty
+                      rule: self.all(x, self[x].size() > 0)
                   maxPods:
                     description: |-
                       maxPods is the maximum number of pods that can run on a node.
@@ -367,6 +373,8 @@ spec:
                     - message: systemReserved value cannot be a negative resource
                         quantity
                       rule: self.all(x, !self[x].startsWith('-'))
+                    - message: systemReserved values must not be empty
+                      rule: self.all(x, self[x].size() > 0)
                 type: object
                 x-kubernetes-preserve-unknown-fields: true
                 x-kubernetes-validations:

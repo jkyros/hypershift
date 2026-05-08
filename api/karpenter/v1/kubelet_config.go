@@ -57,6 +57,7 @@ type KubeletConfiguration struct {
 	// Currently only cpu, memory, ephemeral-storage, and pid are supported.
 	// +kubebuilder:validation:XValidation:message="valid keys for systemReserved are ['cpu','memory','ephemeral-storage','pid']",rule="self.all(x, x=='cpu' || x=='memory' || x=='ephemeral-storage' || x=='pid')"
 	// +kubebuilder:validation:XValidation:message="systemReserved value cannot be a negative resource quantity",rule="self.all(x, !self[x].startsWith('-'))"
+	// +kubebuilder:validation:XValidation:message="systemReserved values must not be empty",rule="self.all(x, self[x].size() > 0)"
 	// +kubebuilder:validation:MinProperties=1
 	// +optional
 	SystemReserved map[string]string `json:"systemReserved,omitempty"`
@@ -65,16 +66,19 @@ type KubeletConfiguration struct {
 	// Currently only cpu, memory, ephemeral-storage, and pid are supported.
 	// +kubebuilder:validation:XValidation:message="valid keys for kubeReserved are ['cpu','memory','ephemeral-storage','pid']",rule="self.all(x, x=='cpu' || x=='memory' || x=='ephemeral-storage' || x=='pid')"
 	// +kubebuilder:validation:XValidation:message="kubeReserved value cannot be a negative resource quantity",rule="self.all(x, !self[x].startsWith('-'))"
+	// +kubebuilder:validation:XValidation:message="kubeReserved values must not be empty",rule="self.all(x, self[x].size() > 0)"
 	// +kubebuilder:validation:MinProperties=1
 	// +optional
 	KubeReserved map[string]string `json:"kubeReserved,omitempty"`
 	// evictionHard is a map of signal names to quantities that defines hard eviction thresholds.
 	// +kubebuilder:validation:XValidation:message="valid keys for evictionHard are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']",rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])"
+	// +kubebuilder:validation:XValidation:message="evictionHard values must not be empty",rule="self.all(x, self[x].size() > 0)"
 	// +kubebuilder:validation:MinProperties=1
 	// +optional
 	EvictionHard map[string]string `json:"evictionHard,omitempty"`
 	// evictionSoft is a map of signal names to quantities that defines soft eviction thresholds.
 	// +kubebuilder:validation:XValidation:message="valid keys for evictionSoft are ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available']",rule="self.all(x, x in ['memory.available','nodefs.available','nodefs.inodesFree','imagefs.available','imagefs.inodesFree','pid.available'])"
+	// +kubebuilder:validation:XValidation:message="evictionSoft values must not be empty",rule="self.all(x, self[x].size() > 0)"
 	// +kubebuilder:validation:MinProperties=1
 	// +optional
 	EvictionSoft map[string]string `json:"evictionSoft,omitempty"`
